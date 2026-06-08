@@ -1,5 +1,25 @@
 # How To Add A Game
 
+## Before Building: Research The Game
+
+When proposing or evaluating a candidate game (per `GameNight.md`'s "Instructions for AI
+to help with preparing the computer version of the game"), report two things up front,
+before recommending build-vs-adapt-existing-GUI:
+
+1. **Existing open-source implementations** — what's on GitHub, how good the visuals
+   are, and whether it's worth adapting vs. building fresh against this repo's
+   `GameProtocol`/`GameViewerProtocol` contracts (see `connect_four/README.md`'s GUI
+   research write-up — or the plan that produced it — for the shape this should take).
+2. **Whether the game is already "solved"** in the game-theory sense — perfect play
+   fully computed (e.g. tic-tac-toe is a forced draw; Connect Four is a forced
+   first-player win, proven by Allis in 1988). Say so explicitly, with the source if
+   findable. It's not disqualifying — it's context: a solved game means a strong bot can
+   play *perfectly*, and perfect-vs-perfect outcomes are a fixed, known result, which can
+   make repeated top-bot-vs-top-bot matches feel less like an open contest over time.
+   Surface this as part of the recommendation, not as a surprise after the build.
+
+## Building The Game
+
 1. Create a new directory under `src/gamenight/games/<game_name>`.
 2. Implement a game class that follows the shared `GameProtocol`:
    - `game_id: str`

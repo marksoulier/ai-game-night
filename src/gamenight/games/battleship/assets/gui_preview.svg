@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="580" viewBox="0 0 1040 580" role="img" aria-label="AI Game Night Battleship GUI preview">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#06141f" />
+      <stop offset="100%" stop-color="#0d2c42" />
+    </linearGradient>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#020a12" flood-opacity="0.55"/>
+    </filter>
+    <pattern id="waterGrid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <rect width="28" height="28" fill="none" stroke="#1c5475" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect x="0" y="0" width="1040" height="580" fill="url(#bg)"/>
+
+  <rect x="60" y="50" rx="18" ry="18" width="920" height="480" fill="#0a2538" filter="url(#shadow)"/>
+
+  <text x="90" y="94" font-family="Avenir, Helvetica, Arial, sans-serif" font-size="32" fill="#eef4f8" font-weight="700">
+    AI Game Night - Battleship
+  </text>
+
+  <text x="90" y="120" font-family="Avenir, Helvetica, Arial, sans-serif" font-size="15" fill="#9fb6c9" font-weight="600">
+    player_blue (greedy)  vs  player_orange (random)
+  </text>
+
+  <rect x="90" y="134" rx="10" ry="10" width="860" height="40" fill="#0e3349"/>
+  <text x="110" y="160" font-family="Avenir, Helvetica, Arial, sans-serif" font-size="18" fill="#eef4f8" font-weight="600">
+    Turn 19: player_blue fired at (3, 6) -- sank the carrier
+  </text>
+
+  <!-- Player name headers -->
+  <text x="170" y="206" font-family="Avenir, Helvetica, Arial, sans-serif" font-size="17" fill="#5aa7ff" font-weight="700">player_blue</text>
+  <text x="590" y="206" font-family="Avenir, Helvetica, Arial, sans-serif" font-size="17" fill="#ff9f45" font-weight="700">player_orange</text>
+
+  <!-- Left board: player_blue's fleet + every shot player_orange has fired at it -->
+  <g transform="translate(170, 215)">
+    <rect x="0" y="0" width="280" height="280" fill="#0e3a52"/>
+    <rect x="0" y="0" width="280" height="280" fill="url(#waterGrid)"/>
+
+    <!-- carrier (5 cells, horizontal, row 0) -- damaged but afloat -->
+    <rect x="4" y="4" width="272" height="20" rx="3" fill="#9aa7b3" stroke="#4a5560" stroke-width="2"/>
+    <line x1="14" y1="14" x2="266" y2="14" stroke="#c7d0d8" stroke-width="2"/>
+    <circle cx="42"  cy="14" r="7" fill="#e63946" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="38" y1="14" x2="46" y2="14" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="42" y1="10" x2="42" y2="18" stroke="#9d1f29" stroke-width="2"/>
+    <circle cx="98"  cy="14" r="7" fill="#e63946" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="94" y1="14" x2="102" y2="14" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="98" y1="10" x2="98" y2="18" stroke="#9d1f29" stroke-width="2"/>
+
+    <!-- battleship (4 cells, vertical, col 6) -- undamaged -->
+    <rect x="172" y="32" width="20" height="104" rx="3" fill="#9aa7b3" stroke="#4a5560" stroke-width="2"/>
+    <line x1="182" y1="42" x2="182" y2="126" stroke="#c7d0d8" stroke-width="2"/>
+
+    <!-- destroyer (2 cells, horizontal, row 8) -- sunk -->
+    <rect x="4" y="228" width="48" height="20" rx="3" fill="#3a4048" stroke="#4a5560" stroke-width="2"/>
+    <line x1="8" y1="232" x2="48" y2="244" stroke="#15181c" stroke-width="3"/>
+    <line x1="8" y1="244" x2="48" y2="232" stroke="#15181c" stroke-width="3"/>
+
+    <!-- misses (open water) -->
+    <circle cx="154" cy="70"  r="6" fill="#bfe9ec" stroke="#6fa8ae" stroke-width="2"/>
+    <circle cx="238" cy="182" r="6" fill="#bfe9ec" stroke="#6fa8ae" stroke-width="2"/>
+    <circle cx="70"  cy="210" r="6" fill="#bfe9ec" stroke="#6fa8ae" stroke-width="2"/>
+  </g>
+
+  <!-- Right board: player_orange's fleet + every shot player_blue has fired at it -->
+  <g transform="translate(590, 215)">
+    <rect x="0" y="0" width="280" height="280" fill="#0e3a52"/>
+    <rect x="0" y="0" width="280" height="280" fill="url(#waterGrid)"/>
+
+    <!-- cruiser (3 cells, vertical, col 2) -- one hit so far -->
+    <rect x="60" y="4" width="20" height="76" rx="3" fill="#9aa7b3" stroke="#4a5560" stroke-width="2"/>
+    <line x1="70" y1="14" x2="70" y2="74" stroke="#c7d0d8" stroke-width="2"/>
+    <circle cx="70" cy="42" r="7" fill="#e63946" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="66" y1="42" x2="74" y2="42" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="70" y1="38" x2="70" y2="46" stroke="#9d1f29" stroke-width="2"/>
+
+    <!-- submarine (3 cells, horizontal, row 5) -- two hits -->
+    <rect x="116" y="144" width="76" height="20" rx="3" fill="#9aa7b3" stroke="#4a5560" stroke-width="2"/>
+    <line x1="126" y1="154" x2="186" y2="154" stroke="#c7d0d8" stroke-width="2"/>
+    <circle cx="140" cy="154" r="7" fill="#e63946" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="136" y1="154" x2="144" y2="154" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="140" y1="150" x2="140" y2="158" stroke="#9d1f29" stroke-width="2"/>
+    <circle cx="168" cy="154" r="7" fill="#e63946" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="164" y1="154" x2="172" y2="154" stroke="#9d1f29" stroke-width="2"/>
+    <line x1="168" y1="150" x2="168" y2="158" stroke="#9d1f29" stroke-width="2"/>
+
+    <!-- misses (open water) -->
+    <circle cx="42"  cy="238" r="6" fill="#bfe9ec" stroke="#6fa8ae" stroke-width="2"/>
+    <circle cx="224" cy="98"  r="6" fill="#bfe9ec" stroke="#6fa8ae" stroke-width="2"/>
+    <circle cx="252" cy="252" r="6" fill="#bfe9ec" stroke="#6fa8ae" stroke-width="2"/>
+  </g>
+
+  <text x="90" y="512" font-family="Avenir, Helvetica, Arial, sans-serif" font-size="14" fill="#9fb6c9">
+    Spectators see both fully revealed fleets -- the bots themselves never do.   Steel = ship   Dark = sunk   Red ring = hit   Pale ring = miss
+  </text>
+</svg>

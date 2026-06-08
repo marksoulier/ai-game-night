@@ -289,6 +289,10 @@ def _build_viewer(game_id: str, matchup_label: str) -> GameViewerProtocol:
         from gamenight.games.connect_four.gui import ConnectFourViewer
 
         return ConnectFourViewer(matchup_label=matchup_label)
+    if game_id == "battleship":
+        from gamenight.games.battleship.gui import BattleshipViewer
+
+        return BattleshipViewer(matchup_label=matchup_label)
     raise typer.BadParameter(f"GUI mode is not yet implemented for game '{game_id}'.")
 
 

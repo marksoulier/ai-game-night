@@ -15,3 +15,13 @@ Infrastructure for the game night code base will be modular where bots will be d
 Instructions for AI to help with preparing the computer version of the game:
 
 Discuss what is currently online in githubs for digital representation of the game, look at how good the visuals are and how well it would integrate into the game night framework. Propose either creating the game from scratch or utilizing another open source digital version of the game. Place the game modular in the game night framework so multiple games can be side by side. Utilize uv and python as the base systems for running the game. Python will be the base for running the infastructure. A single uv install will be used for the entire infrastructure. 
+
+Also check whether the game is already "solved" in the game-theory sense (perfect play
+fully computed — e.g. tic-tac-toe is a forced draw, Connect Four is a forced first-player
+win) and report that up front before recommending it, including who proved it and when if
+that's findable. This isn't a reason to rule a game out by itself — it's context the
+person choosing should have going in: a solved game means a strong-enough bot can play
+*perfectly* rather than just "well," and that perfect-vs-perfect outcomes are a known,
+fixed result, which can flatten how surprising repeated top-bot-vs-top-bot matches feel
+over time. Better to surface that as part of the recommendation than have it discovered
+as a surprise after the infrastructure for the game is already built.
