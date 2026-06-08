@@ -24,18 +24,19 @@ def run_round_robin(
     wins = {bot_id: 0 for bot_id in bot_ids}
     draws = 0
     total_matches = 0
+    first_id, second_id = game.player_ids[0], game.player_ids[1]
 
     for _ in range(rounds):
         for p1, p2 in product(bot_ids, bot_ids):
             if p1 == p2:
                 continue
             total_matches += 1
-            match_bots = {"player_x": bots[p1], "player_o": bots[p2]}
+            match_bots = {first_id: bots[p1], second_id: bots[p2]}
             result: MatchResult = run_match(game=game, bots=match_bots, max_turns=max_turns)
 
             if result.winner is None:
                 draws += 1
-            elif result.winner == "player_x":
+            elif result.winner == first_id:
                 wins[p1] += 1
             else:
                 wins[p2] += 1

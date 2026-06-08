@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from gamenight.core.protocols import BotProtocol
 from gamenight.core.types import Action, Observation, StepResult
+from gamenight.games.tictactoe.bots.baselines.greedy_bot import GreedyBot
+from gamenight.games.tictactoe.bots.baselines.human_terminal import HumanTerminalBot
+from gamenight.games.tictactoe.bots.baselines.random_bot import RandomBot
 
 
 WIN_LINES = [
@@ -28,6 +32,17 @@ class TicTacToeState:
 
 class TicTacToeGame:
     game_id = "tictactoe"
+    player_ids = ["player_x", "player_o"]
+
+    def build_baseline_bot(self, name: str, bot_id: str) -> BotProtocol:
+        baseline = name.lower().strip()
+        if baseline == "random":
+            return RandomBot(bot_id=bot_id)
+        if baseline == "human":
+            return HumanTerminalBot(bot_id=bot_id)
+        if baseline == "greedy":
+            return GreedyBot(bot_id=bot_id)
+        raise ValueError(f"Unknown bot name: {name}")
 
     def create_initial_state(self, seed: int | None = None) -> dict:
         return {

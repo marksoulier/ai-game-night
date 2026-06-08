@@ -57,13 +57,13 @@ There is no hidden state in Tic-Tac-Toe, so bots get everything a real player wo
 Headless quick match:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode headless --bot-x random --bot-o greedy
+uv run gamenight run-game --game tictactoe --mode headless --bot-1 random --bot-2 greedy
 ```
 
 GUI match:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode gui --bot-x player:mark --bot-o random --gui-delay 0.4 --replay-file artifacts/mark_vs_random_gui.json
+uv run gamenight run-game --game tictactoe --mode gui --bot-1 player:mark --bot-2 random --gui-delay 0.4 --replay-file artifacts/mark_vs_random_gui.json
 ```
 
 Large series with randomized first-player order:

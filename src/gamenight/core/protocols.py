@@ -17,6 +17,7 @@ class BotProtocol(Protocol):
 
 class GameProtocol(Protocol):
     game_id: str
+    player_ids: list[str]
 
     def create_initial_state(self, seed: int | None = None) -> Any:
         ...
@@ -34,4 +35,24 @@ class GameProtocol(Protocol):
         ...
 
     def render_text(self, state: Any) -> str:
+        ...
+
+    def build_baseline_bot(self, name: str, bot_id: str) -> BotProtocol:
+        ...
+
+
+class GameViewerProtocol(Protocol):
+    def update_state(
+        self,
+        state: Any,
+        turn: int | None = None,
+        acting_player: str | None = None,
+        action: dict[str, Any] | None = None,
+    ) -> None:
+        ...
+
+    def wait_until_closed(self) -> None:
+        ...
+
+    def close(self) -> None:
         ...

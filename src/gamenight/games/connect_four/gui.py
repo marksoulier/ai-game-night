@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from gamenight.games.connect_four.game import COLUMNS, ROWS
 
-class TicTacToeViewer:
+
+EMPTY_COLOR = "#e7edf6"
+RED_COLOR = "#d6483f"
+YELLOW_COLOR = "#e8c33b"
+DISC_COLORS = {" ": EMPTY_COLOR, "R": RED_COLOR, "Y": YELLOW_COLOR}
+CELL_SIZE = 56
+DISC_PADDING = 6
+
+
+class ConnectFourViewer:
     def __init__(self, matchup_label: str | None = None) -> None:
         self.closed = False
         self.root = tk.Tk()
-        self.root.title("AI Game Night - Tic-Tac-Toe")
-        self.root.geometry("360x470")
+        self.root.title("AI Game Night - Connect Four")
+        self.root.geometry(f"{COLUMNS * CELL_SIZE + 80}x{ROWS * CELL_SIZE + 170}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if matchup_label:
@@ -19,36 +29,22 @@ class TicTacToeViewer:
         status_label = tk.Label(self.root, textvariable=self.status_var, font=("Helvetica", 14, "bold"))
         status_label.pack(pady=12)
 
-        board_frame = tk.Frame(self.root)
-        board_frame.pack(pady=8)
+        board_width = COLUMNS * CELL_SIZE
+        board_height = ROWS * CELL_SIZE
+        self.canvas = tk.Canvas(self.root, width=board_width, height=board_height, bg="#3a6ea5", highlightthickness=0)
+        self.canvas.pack(pady=8)
 
-        self.cells: list[tk.StringVar] = []
-        self.index_labels: list[tk.Label] = []
-        for index in range(9):
-            cell_var = tk.StringVar(value=" ")
-            self.cells.append(cell_var)
-            frame = tk.Frame(board_frame)
-            marker_label = tk.Label(
-                frame,
-                textvariable=cell_var,
-                width=4,
-                height=1,
-                font=("Helvetica", 30, "bold"),
-                relief="ridge",
-                borderwidth=2,
-            )
-            marker_label.pack()
-            idx_label = tk.Label(
-                frame,
-                text=f"{index}",
-                font=("Helvetica", 10),
-                fg="#888888"
-            )
-            idx_label.pack()
-            self.index_labels.append(idx_label)
-            row = index // 3
-            col = index % 3
-            frame.grid(row=row, column=col, padx=2, pady=2)
+        self.discs: list[list[int]] = []
+        for row in range(ROWS):
+            disc_row: list[int] = []
+            for col in range(COLUMNS):
+                x0 = col * CELL_SIZE + DISC_PADDING
+                y0 = row * CELL_SIZE + DISC_PADDING
+                x1 = (col + 1) * CELL_SIZE - DISC_PADDING
+                y1 = (row + 1) * CELL_SIZE - DISC_PADDING
+                disc_id = self.canvas.create_oval(x0, y0, x1, y1, fill=EMPTY_COLOR, outline="#2a4f74", width=2)
+                disc_row.append(disc_id)
+            self.discs.append(disc_row)
 
         legend = tk.Label(
             self.root,
@@ -68,8 +64,10 @@ class TicTacToeViewer:
             return
 
         board = state["board"]
-        for idx, marker in enumerate(board):
-            self.cells[idx].set(marker if marker != " " else " ")
+        for row in range(ROWS):
+            for col in range(COLUMNS):
+                marker = board[row * COLUMNS + col]
+                self.canvas.itemconfigure(self.discs[row][col], fill=DISC_COLORS[marker])
 
         if state["done"]:
             if state["winner"] is None:

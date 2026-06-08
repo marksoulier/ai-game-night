@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
 import importlib.util
+import py_compile
 import random
 import secrets
 from dataclasses import asdict, dataclass
@@ -11,11 +13,9 @@ from typing import Any
 import typer
 
 from gamenight.core.match import load_replay_file, run_match, run_match_with_observer, save_replay_file
+from gamenight.core.protocols import BotProtocol, GameProtocol, GameViewerProtocol
 from gamenight.core.replay import replay_to_text
 from gamenight.games import build_registry
-from gamenight.games.tictactoe.bots.baselines.greedy_bot import GreedyBot
-from gamenight.games.tictactoe.bots.baselines.human_terminal import HumanTerminalBot
-from gamenight.games.tictactoe.bots.baselines.random_bot import RandomBot
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -45,32 +45,33 @@ def list_games() -> None:
 def run_game(
     game: str = typer.Option("tictactoe", help="Game id to run."),
     mode: str = typer.Option("headless", help="Runtime mode: headless or gui."),
-    bot_x: str = typer.Option(
+    bot_1: str = typer.Option(
         "greedy",
-        help="Bot for player_x: greedy, random, human, or player:<folder_name>.",
+        help="Bot for the first player (game.player_ids[0]): greedy, random, human, or player:<folder_name>.",
     ),
-    bot_o: str = typer.Option(
+    bot_2: str = typer.Option(
         "random",
-        help="Bot for player_o: greedy, random, human, or player:<folder_name>.",
+        help="Bot for the second player (game.player_ids[1]): greedy, random, human, or player:<folder_name>.",
     ),
     gui_delay: float = typer.Option(0.5, help="Delay (seconds) between GUI turns."),
     replay_file: Path = typer.Option(Path("artifacts/latest_replay.json"), help="Replay output path."),
 ) -> None:
     registry = build_registry()
     game_impl = registry.get(game)
+    first_id, second_id = game_impl.player_ids[0], game_impl.player_ids[1]
 
     bots = {
-        "player_x": _build_bot(bot_x, "player_x"),
-        "player_o": _build_bot(bot_o, "player_o"),
+        first_id: _build_bot(game_impl, bot_1, first_id, game),
+        second_id: _build_bot(game_impl, bot_2, second_id, game),
     }
 
     if mode not in {"headless", "gui"}:
         raise typer.BadParameter("mode must be 'headless' or 'gui'")
 
     if mode == "gui":
-        if game != "tictactoe":
-            raise typer.BadParameter("GUI mode is currently implemented for tictactoe only.")
-        result = _run_tictactoe_gui_match(game_impl, bots, gui_delay)
+        matchup_label = f"{first_id} ({bot_1})  vs  {second_id} ({bot_2})"
+        viewer = _build_viewer(game, matchup_label)
+        result = _run_gui_match(game_impl, bots, gui_delay, viewer)
     else:
         result = run_match(game_impl, bots)
 
@@ -109,6 +110,7 @@ def run_series(
 ) -> None:
     registry = build_registry()
     game_impl = registry.get(game)
+    first_id, second_id = game_impl.player_ids[0], game_impl.player_ids[1]
 
     policy = starting_policy.strip().lower()
     allowed_policies = {"fixed-a", "fixed-b", "alternate", "random"}
@@ -129,15 +131,15 @@ def run_series(
         first_player_counts[first] += 1
 
         if first == "bot_a":
-            x_name, o_name = "bot_a", "bot_b"
-            x_bot_name, o_bot_name = bot_a, bot_b
+            first_name, second_name = "bot_a", "bot_b"
+            first_bot_name, second_bot_name = bot_a, bot_b
         else:
-            x_name, o_name = "bot_b", "bot_a"
-            x_bot_name, o_bot_name = bot_b, bot_a
+            first_name, second_name = "bot_b", "bot_a"
+            first_bot_name, second_bot_name = bot_b, bot_a
 
         bots = {
-            "player_x": _build_bot(x_bot_name, "player_x"),
-            "player_o": _build_bot(o_bot_name, "player_o"),
+            first_id: _build_bot(game_impl, first_bot_name, first_id, game),
+            second_id: _build_bot(game_impl, second_bot_name, second_id, game),
         }
         match_seed = None if match_seed_base is None else match_seed_base + game_index
         result = run_match(game_impl, bots, seed=match_seed)
@@ -146,7 +148,7 @@ def run_series(
             draws += 1
             continue
 
-        winner_name = x_name if result.winner == "player_x" else o_name
+        winner_name = first_name if result.winner == first_id else second_name
         wins[winner_name] += 1
 
     summary = SeriesSummary(
@@ -179,31 +181,65 @@ def replay(
     typer.echo(replay_to_text(replay_events, max_rows=rows))
 
 
-def _build_bot(bot_name: str, bot_id: str):
+@app.command("encode-bot")
+def encode_bot(
+    game: str = typer.Option(..., help="Game id the bot belongs to."),
+    player: str = typer.Option(..., help="Player folder name under bots/players/."),
+) -> None:
+    """Compile bot.py to bot.pyc so it can be shared and run without exposing source.
+
+    Useful for "submit blind, then play everyone's bot" formats: commit bot.pyc instead
+    of bot.py, and opponents can run `player:<name>` exactly as before — the loader picks
+    up the compiled file automatically — without reading your strategy first. This is
+    obscurity, not security: bytecode can be decompiled by someone who goes looking for
+    it, so it only helps with "don't spoil the reveal," not with hiding from a determined
+    reader. It is also tied to the Python version that compiled it (this project pins
+    Python 3.13 via uv, so it travels fine between participants who run it the normal
+    `uv run gamenight ...` way).
+    """
+    bot_dir = Path(__file__).resolve().parent.parent / "games" / game / "bots" / "players" / player
+    source_file = bot_dir / "bot.py"
+    encoded_file = bot_dir / "bot.pyc"
+
+    if not source_file.exists():
+        raise typer.BadParameter(f"No bot.py found at {source_file}")
+
+    py_compile.compile(str(source_file), cfile=str(encoded_file), doraise=True)
+
+    typer.echo(f"encoded {source_file} -> {encoded_file}")
+    typer.echo("Commit bot.pyc (the loader prefers bot.py over bot.pyc when both are")
+    typer.echo("present, so remove or .gitignore bot.py once you're ready to go blind).")
+
+
+def _build_bot(game_impl: GameProtocol, bot_name: str, bot_id: str, game_id: str) -> BotProtocol:
     name = bot_name.lower().strip()
-    if name == "random":
-        return RandomBot(bot_id=bot_id)
-    if name == "human":
-        return HumanTerminalBot(bot_id=bot_id)
-    if name == "greedy":
-        return GreedyBot(bot_id=bot_id)
     if name.startswith("player:"):
         player_name = name.split(":", maxsplit=1)[1].strip()
-        return _load_player_bot(player_name=player_name, bot_id=bot_id)
-    raise ValueError(f"Unknown bot name: {bot_name}")
+        return _load_player_bot(game_id=game_id, player_name=player_name, bot_id=bot_id)
+    return game_impl.build_baseline_bot(name, bot_id)
 
 
-def _load_player_bot(player_name: str, bot_id: str):
+def _load_player_bot(game_id: str, player_name: str, bot_id: str) -> BotProtocol:
     if not player_name:
         raise ValueError("Player bot name cannot be empty. Use player:<folder_name>.")
 
-    players_root = Path(__file__).resolve().parent.parent / "games" / "tictactoe" / "bots" / "players"
-    bot_file = players_root / player_name / "bot.py"
-    if not bot_file.exists():
-        raise FileNotFoundError(f"Player bot file not found: {bot_file}")
+    bot_dir = Path(__file__).resolve().parent.parent / "games" / game_id / "bots" / "players" / player_name
+    source_file = bot_dir / "bot.py"
+    encoded_file = bot_dir / "bot.pyc"
+    module_name = f"gamenight_{game_id}_player_{player_name}"
 
-    module_name = f"gamenight_tictactoe_player_{player_name}"
-    spec = importlib.util.spec_from_file_location(module_name, bot_file)
+    if source_file.exists():
+        bot_file: Path = source_file
+        spec = importlib.util.spec_from_file_location(module_name, bot_file)
+    elif encoded_file.exists():
+        # No source present — this is a "blind" submission shared via `encode-bot`.
+        # SourcelessFileLoader runs compiled bytecode directly, with no .py needed.
+        bot_file = encoded_file
+        loader = importlib.machinery.SourcelessFileLoader(module_name, str(bot_file))
+        spec = importlib.util.spec_from_file_location(module_name, bot_file, loader=loader)
+    else:
+        raise FileNotFoundError(f"Neither bot.py nor bot.pyc found in {bot_dir}")
+
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load module spec for {bot_file}")
 
@@ -244,11 +280,24 @@ def _to_pretty_json(data: Any) -> str:
     return json.dumps(data, indent=2)
 
 
-def _run_tictactoe_gui_match(game_impl, bots, gui_delay: float):
-    from gamenight.games.tictactoe.gui import TicTacToeViewer
+def _build_viewer(game_id: str, matchup_label: str) -> GameViewerProtocol:
+    if game_id == "tictactoe":
+        from gamenight.games.tictactoe.gui import TicTacToeViewer
 
-    viewer = TicTacToeViewer()
+        return TicTacToeViewer(matchup_label=matchup_label)
+    if game_id == "connect_four":
+        from gamenight.games.connect_four.gui import ConnectFourViewer
 
+        return ConnectFourViewer(matchup_label=matchup_label)
+    raise typer.BadParameter(f"GUI mode is not yet implemented for game '{game_id}'.")
+
+
+def _run_gui_match(
+    game_impl: GameProtocol,
+    bots: dict[str, BotProtocol],
+    gui_delay: float,
+    viewer: GameViewerProtocol,
+):
     def step_observer(event: dict) -> None:
         viewer.update_state(
             state=event["state"],

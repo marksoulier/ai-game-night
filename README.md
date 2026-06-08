@@ -48,7 +48,7 @@ uv run gamenight replay --replay-file artifacts/latest_replay.json
 1. Run random vs random:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode headless --bot-x random --bot-o random --replay-file artifacts/random_vs_random.json
+uv run gamenight run-game --game tictactoe --mode headless --bot-1 random --bot-2 random --replay-file artifacts/random_vs_random.json
 ```
 
 2. Replay the random match:
@@ -60,13 +60,13 @@ uv run gamenight replay --replay-file artifacts/random_vs_random.json
 3. Run human vs random (you play as X):
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode headless --bot-x human --bot-o random --replay-file artifacts/human_vs_random.json
+uv run gamenight run-game --game tictactoe --mode headless --bot-1 human --bot-2 random --replay-file artifacts/human_vs_random.json
 ```
 
 3b. Run human vs random with live GUI board:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode gui --bot-x human --bot-o random --gui-delay 0.4 --replay-file artifacts/human_vs_random_gui.json
+uv run gamenight run-game --game tictactoe --mode gui --bot-1 human --bot-2 random --gui-delay 0.4 --replay-file artifacts/human_vs_random_gui.json
 ```
 
 This mode shows a live Tic-Tac-Toe window while you still choose moves in terminal prompts.
@@ -81,7 +81,7 @@ cp src/gamenight/games/tictactoe/bots/players/example_player/bot.py src/gamenigh
 5. Run your bot against random:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode headless --bot-x player:<your_name> --bot-o random --replay-file artifacts/<your_name>_vs_random.json
+uv run gamenight run-game --game tictactoe --mode headless --bot-1 player:<your_name> --bot-2 random --replay-file artifacts/<your_name>_vs_random.json
 ```
 
 ## Large Series With Configurable First Player

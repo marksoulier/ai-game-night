@@ -39,6 +39,7 @@ The infrastructure agent does not implement competitive player strategy bots und
 4. Validate with representative commands before finishing:
    - `uv run gamenight list-games`
    - `uv run gamenight run-game --game tictactoe --mode headless`
+   - `uv run gamenight run-game --game connect_four --mode headless --bot-1 greedy --bot-2 random`
    - `uv run gamenight replay --replay-file artifacts/latest_replay.json`
 
 ## Definition Of Done

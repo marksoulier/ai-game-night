@@ -17,6 +17,15 @@ Rules:
    - `reset(context)`
    - `choose_action(observation, context)`
 
+Not sure what's actually inside `observation`? Your editor can only tell you it's a
+plain dict — every game has a different shape. Open `example_player/bot.py`: its
+`choose_action` docstring walks through every field Connect Four puts in `observation`
+(and `context`), with the type and valid range of each one, annotated inline right where
+you'll be reading and writing code. The same shape is also documented in `../../BOT_SPEC.md`
+(the full spec) and `../../EXAMPLES.md` (a complete worked request/response example) —
+all three describe the same thing, just at different levels of "show me in the code" vs.
+"give me the reference doc."
+
 ## Do And Do Not
 
 Do:
@@ -46,5 +55,5 @@ Examples:
 You can run any of them by folder name:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode headless --bot-1 player:mark_v2 --bot-2 random
+uv run gamenight run-game --game connect_four --mode headless --bot-1 player:mark_v2 --bot-2 random
 ```

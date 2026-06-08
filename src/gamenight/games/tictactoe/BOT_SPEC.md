@@ -73,5 +73,5 @@ For example:
 Use uv command style:
 
 ```bash
-uv run gamenight run-game --game tictactoe --mode headless --bot-x player:<your_bot_name> --bot-o random
+uv run gamenight run-game --game tictactoe --mode headless --bot-1 player:<your_bot_name> --bot-2 random
 ```
