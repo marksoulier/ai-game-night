@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from functools import lru_cache
 
 from gamenight.core.types import Action, MatchContext, Observation
@@ -24,41 +25,72 @@ class PlayerBot:
             raise ValueError("No legal actions available")
 
         if observation["public_state"]["phase"] == "placement":
-            return self._choose_placement(observation)
+            return self._choose_placement(observation, context)
         return self._choose_battle(observation)
 
-    def _choose_placement(self, observation: Observation) -> Action:
+    def _choose_placement(self, observation: Observation, context: MatchContext) -> Action:
         legal_actions = observation["legal_actions"]
         ship_lengths = {ship["name"]: ship["length"] for ship in observation["context"]["ships"]}
-        occupied = {
-            tuple(cell)
-            for ship in observation["private_state"]["your_fleet"]
-            for cell in ship["cells"]
-        }
+        ship_order = [ship["name"] for ship in observation["context"]["ships"]]
+        ship_name = observation["context"].get("next_ship_to_place") or legal_actions[0]["ship"]
+        ship_index = ship_order.index(ship_name) if ship_name in ship_order else 0
+        preferred_edge = ship_index % 4
+        board_size = observation["context"]["board_size"]
 
-        if not occupied:
-            return max(legal_actions, key=lambda action: self._placement_spread_score(action, ship_lengths))
+        def score(action: Action) -> tuple[int, int, float, float, int, int]:
+            cells = self._cells_for(
+                action["row"],
+                action["col"],
+                ship_lengths[action["ship"]],
+                action["orientation"],
+            )
+            preferred_edge_cells = sum(
+                1
+                for row, col in cells
+                if (
+                    (preferred_edge == 0 and row == 0)
+                    or (preferred_edge == 1 and col == board_size - 1)
+                    or (preferred_edge == 2 and row == board_size - 1)
+                    or (preferred_edge == 3 and col == 0)
+                )
+            )
+            any_edge_cells = sum(
+                1
+                for row, col in cells
+                if row in {0, board_size - 1} or col in {0, board_size - 1}
+            )
+            distance_from_center = sum(abs(row - CENTER) + abs(col - CENTER) for row, col in cells)
+            noise_seed = f"{context.seed}:{self.bot_id}:{ship_name}:{action['row']}:{action['col']}:{action['orientation']}"
+            noise = random.Random(noise_seed).random()
+            return (
+                preferred_edge_cells,
+                any_edge_cells,
+                distance_from_center,
+                noise,
+                -action["row"],
+                -action["col"],
+            )
 
-        return min(legal_actions, key=lambda action: self._placement_score(action, occupied, ship_lengths))
+        return max(legal_actions, key=score)
 
     def _choose_battle(self, observation: Observation) -> Action:
         legal_actions = observation["legal_actions"]
         tracking = observation["private_state"]["tracking_grid"]
-        remaining_lengths = self._remaining_ship_lengths(observation)
-        blocked_cells = self._blocked_cells(tracking)
         hit_cells = self._hit_cells(tracking)
+        legal_cells = {(action["row"], action["col"]): action for action in legal_actions}
 
         if hit_cells:
-            heatmap = self._build_heatmap(remaining_lengths, blocked_cells, hit_cells)
-            if heatmap:
-                return self._choose_from_heatmap(legal_actions, heatmap, tracking)
-            return self._fallback_near_hits(legal_actions, hit_cells)
+            line = self._infer_line(sorted(hit_cells))
+            if line is not None:
+                extension = self._extend_line(line, legal_cells)
+                if extension is not None:
+                    return extension
 
-        heatmap = self._build_heatmap(remaining_lengths, blocked_cells, None)
-        if heatmap:
-            return self._choose_from_heatmap(legal_actions, heatmap, tracking)
+            adjacent_target = self._target_next_to_hit(legal_cells, hit_cells)
+            if adjacent_target is not None:
+                return adjacent_target
 
-        return self._choose_parity_fallback(legal_actions)
+        return self._best_probability_target(legal_actions, tracking, observation)
 
     def _placement_score(
         self,
@@ -84,50 +116,45 @@ class PlayerBot:
         orientation_bias = 0 if action["orientation"] == "horizontal" else 1
         return (edge_bias, -abs(action["row"] - CENTER), action["row"], action["col"], orientation_bias)
 
-    def _choose_from_heatmap(
+    def _best_probability_target(
         self,
         legal_actions: list[Action],
-        heatmap: dict[tuple[int, int], int],
         tracking: list[list[str]],
+        observation: Observation,
     ) -> Action:
-        best_action = legal_actions[0]
-        best_score: tuple[int, int, int, int, int, int] | None = None
-        for action in legal_actions:
-            cell = (action["row"], action["col"])
-            score = (
-                heatmap.get(cell, 0),
-                self._adjacent_hit_count(cell, tracking),
-                1 if (cell[0] + cell[1]) % 2 == 0 else 0,
-                -self._distance_to_center(cell),
-                -cell[0],
-                -cell[1],
-            )
-            if best_score is None or score > best_score:
-                best_score = score
-                best_action = action
-        return best_action
+        legal_cells = {(action["row"], action["col"]): action for action in legal_actions}
+        scores: dict[tuple[int, int], float] = {cell: 0.0 for cell in legal_cells}
+        remaining_lengths = self._remaining_ship_lengths(observation)
+        has_open_hits = any(cell == "H" for row in tracking for cell in row)
 
-    def _fallback_near_hits(self, legal_actions: list[Action], hit_cells: set[tuple[int, int]]) -> Action:
-        legal_by_cell = {(action["row"], action["col"]): action for action in legal_actions}
-        line = self._infer_line(sorted(hit_cells))
-        if line is not None:
-            extension = self._extend_line(line, legal_by_cell)
-            if extension is not None:
-                return extension
+        for length in remaining_lengths:
+            for orientation in ("horizontal", "vertical"):
+                max_row = BOARD_SIZE if orientation == "horizontal" else BOARD_SIZE - length + 1
+                max_col = BOARD_SIZE - length + 1 if orientation == "horizontal" else BOARD_SIZE
+                for row in range(max_row):
+                    for col in range(max_col):
+                        cells = self._cells_for(row, col, length, orientation)
+                        if any(tracking[cell_row][cell_col] in {"M", "X"} for cell_row, cell_col in cells):
+                            continue
 
-        for row, col in sorted(hit_cells, key=lambda cell: (-cell[0], -cell[1])):
-            for delta_row, delta_col in ORTHOGONAL_NEIGHBORS:
-                candidate = (row + delta_row, col + delta_col)
-                if candidate in legal_by_cell:
-                    return legal_by_cell[candidate]
+                        hit_overlap = sum(1 for cell_row, cell_col in cells if tracking[cell_row][cell_col] == "H")
+                        if has_open_hits and hit_overlap == 0:
+                            continue
 
-        return self._choose_parity_fallback(legal_actions)
+                        placement_weight = 1.0 + hit_overlap * 4.0
+                        for cell_row, cell_col in cells:
+                            if (cell_row, cell_col) in scores:
+                                scores[(cell_row, cell_col)] += placement_weight
 
-    def _choose_parity_fallback(self, legal_actions: list[Action]) -> Action:
-        parity_targets = [action for action in legal_actions if (action["row"] + action["col"]) % 2 == 0]
-        if parity_targets:
-            return min(parity_targets, key=lambda action: (action["row"], action["col"]))
-        return min(legal_actions, key=lambda action: (action["row"], action["col"]))
+        if all(score == 0.0 for score in scores.values()):
+            for (row, col), action in legal_cells.items():
+                scores[(row, col)] = float(
+                    sum(1 for d_row, d_col in ORTHOGONAL_NEIGHBORS if tracking[row + d_row][col + d_col] == "H")
+                )
+                if (row + col) % 2 == 0:
+                    scores[(row, col)] += 0.25
+
+        return max(legal_actions, key=lambda action: (scores[(action["row"], action["col"])] , -action["row"], -action["col"]))
 
     @staticmethod
     def _infer_line(hits: list[tuple[int, int]]):
@@ -154,6 +181,18 @@ class PlayerBot:
         for candidate in candidates:
             if candidate in legal_cells:
                 return legal_cells[candidate]
+        return None
+
+    def _target_next_to_hit(
+        self,
+        legal_cells: dict[tuple[int, int], Action],
+        hit_cells: set[tuple[int, int]],
+    ) -> Action | None:
+        for row, col in sorted(hit_cells, key=lambda cell: (-cell[0], -cell[1])):
+            for delta_row, delta_col in ORTHOGONAL_NEIGHBORS:
+                candidate = (row + delta_row, col + delta_col)
+                if candidate in legal_cells:
+                    return legal_cells[candidate]
         return None
 
     def _build_heatmap(
