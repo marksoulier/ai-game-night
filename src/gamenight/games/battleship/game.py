@@ -18,6 +18,7 @@ SHIPS = [
     ("destroyer", 2),
 ]
 SHIP_LENGTHS = dict(SHIPS)
+TOTAL_FLEET_CELLS = sum(length for _, length in SHIPS)
 
 
 def _ship_cells(row: int, col: int, length: int, orientation: str) -> list[list[int]]:
@@ -83,6 +84,9 @@ class BattleshipGame:
                 "turn_index": state["turn_index"],
                 "done": state["done"],
                 "winner": state["winner"],
+                "points": {
+                    pid: self.remaining_points(state, pid) for pid in self.player_ids
+                },
             },
             "private_state": {
                 "your_fleet": [self._ship_view(ship) for ship in your_fleet],
@@ -114,6 +118,15 @@ class BattleshipGame:
         rewards = self._rewards(next_state["winner"])
         return StepResult(next_state=next_state, rewards=rewards, done=next_state["done"], events=events)
 
+    def remaining_points(self, state: dict, player_id: str) -> int:
+        """Cells of player_id's fleet that have not been hit yet.
+
+        Starts at TOTAL_FLEET_CELLS (17) once placement completes and counts down as the
+        opponent lands hits -- a fleet-health score usable as a tiebreaker independent of
+        win/loss (e.g. for ranking series or bracket matches that don't end in a sink).
+        """
+        return sum(len(ship["cells"]) - len(ship["hits"]) for ship in state["fleets"][player_id])
+
     def render_text(self, state: dict) -> str:
         first_id, second_id = self.player_ids
         lines = [
@@ -121,6 +134,9 @@ class BattleshipGame:
         ]
         if state["done"]:
             lines.append(f"Game over: winner is {state['winner']}")
+
+        points = {pid: self.remaining_points(state, pid) for pid in self.player_ids}
+        lines.append(f"Points (cells remaining): {first_id}={points[first_id]}  {second_id}={points[second_id]}")
 
         left = self._render_player_board(state, first_id)
         right = self._render_player_board(state, second_id)

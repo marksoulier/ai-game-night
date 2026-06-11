@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.machinery
-import importlib.util
 import py_compile
-import random
 import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,7 +9,15 @@ from typing import Any
 
 import typer
 
-from gamenight.core.match import load_replay_file, run_match, run_match_with_observer, save_replay_file
+from gamenight.core.bots import build_bot
+from gamenight.core.bracket import bracket_to_dict, bracket_to_text, run_bracket
+from gamenight.core.match import (
+    MatchResult,
+    load_replay_file,
+    run_match,
+    run_match_with_observer,
+    save_replay_file,
+)
 from gamenight.core.protocols import BotProtocol, GameProtocol, GameViewerProtocol
 from gamenight.core.replay import replay_to_text
 from gamenight.games import build_registry
@@ -61,17 +66,26 @@ def run_game(
     first_id, second_id = game_impl.player_ids[0], game_impl.player_ids[1]
 
     bots = {
-        first_id: _build_bot(game_impl, bot_1, first_id, game),
-        second_id: _build_bot(game_impl, bot_2, second_id, game),
+        first_id: build_bot(game_impl, bot_1, first_id, game),
+        second_id: build_bot(game_impl, bot_2, second_id, game),
     }
 
     if mode not in {"headless", "gui"}:
         raise typer.BadParameter("mode must be 'headless' or 'gui'")
 
     if mode == "gui":
-        matchup_label = f"{first_id} ({bot_1})  vs  {second_id} ({bot_2})"
+        matchup_label = None if game == "battleship" else f"{first_id} ({bot_1})  vs  {second_id} ({bot_2})"
         viewer = _build_viewer(game, matchup_label)
-        result = _run_gui_match(game_impl, bots, gui_delay, viewer)
+        if hasattr(viewer, "set_names"):
+            viewer.set_names({first_id: bot_1, second_id: bot_2})
+        try:
+            result = _run_gui_game(game_impl, bots, gui_delay, viewer)
+            if hasattr(viewer, "set_records"):
+                viewer.set_records(_single_game_records(result, first_id, second_id))
+            typer.echo("GUI match complete. Close the game window when finished viewing.")
+            viewer.wait_until_closed()
+        finally:
+            viewer.close()
     else:
         result = run_match(game_impl, bots)
 
@@ -103,6 +117,10 @@ def run_series(
         None,
         help="Optional base seed for game internals; each game uses match_seed_base + game_index.",
     ),
+    mode: str = typer.Option(
+        "headless", help="Runtime mode: headless or gui. GUI mode replays each game live; best for small --games counts."
+    ),
+    gui_delay: float = typer.Option(0.5, help="Delay (seconds) between GUI turns (gui mode only)."),
     summary_file: Path = typer.Option(
         Path("artifacts/series_summary.json"),
         help="Output JSON file for series summary.",
@@ -117,39 +135,68 @@ def run_series(
     if policy not in allowed_policies:
         raise typer.BadParameter("starting-policy must be one of: fixed-a, fixed-b, alternate, random")
 
+    if mode not in {"headless", "gui"}:
+        raise typer.BadParameter("mode must be 'headless' or 'gui'")
+
     wins = {"bot_a": 0, "bot_b": 0}
+    losses = {"bot_a": 0, "bot_b": 0}
     first_player_counts = {"bot_a": 0, "bot_b": 0}
     draws = 0
 
-    for game_index in range(games):
-        first = _series_first_player(
-            policy=policy,
-            game_index=game_index,
-            order_seed=order_seed,
-            order_key=order_key,
-        )
-        first_player_counts[first] += 1
+    viewer: GameViewerProtocol | None = None
+    if mode == "gui":
+        viewer = _build_viewer(game, f"{bot_a} vs {bot_b}  (best of {games})")
 
-        if first == "bot_a":
-            first_name, second_name = "bot_a", "bot_b"
-            first_bot_name, second_bot_name = bot_a, bot_b
-        else:
-            first_name, second_name = "bot_b", "bot_a"
-            first_bot_name, second_bot_name = bot_b, bot_a
+    try:
+        for game_index in range(games):
+            first = _series_first_player(
+                policy=policy,
+                game_index=game_index,
+                order_seed=order_seed,
+                order_key=order_key,
+            )
+            first_player_counts[first] += 1
 
-        bots = {
-            first_id: _build_bot(game_impl, first_bot_name, first_id, game),
-            second_id: _build_bot(game_impl, second_bot_name, second_id, game),
-        }
-        match_seed = None if match_seed_base is None else match_seed_base + game_index
-        result = run_match(game_impl, bots, seed=match_seed)
+            if first == "bot_a":
+                first_name, second_name = "bot_a", "bot_b"
+                first_bot_name, second_bot_name = bot_a, bot_b
+            else:
+                first_name, second_name = "bot_b", "bot_a"
+                first_bot_name, second_bot_name = bot_b, bot_a
 
-        if result.winner is None:
-            draws += 1
-            continue
+            bots = {
+                first_id: build_bot(game_impl, first_bot_name, first_id, game),
+                second_id: build_bot(game_impl, second_bot_name, second_id, game),
+            }
+            match_seed = None if match_seed_base is None else match_seed_base + game_index
 
-        winner_name = first_name if result.winner == first_id else second_name
-        wins[winner_name] += 1
+            if viewer is not None:
+                if hasattr(viewer, "set_names"):
+                    viewer.set_names({first_id: first_bot_name, second_id: second_bot_name})
+                result = _run_gui_game(game_impl, bots, gui_delay, viewer, seed=match_seed)
+            else:
+                result = run_match(game_impl, bots, seed=match_seed)
+
+            if result.winner is None:
+                draws += 1
+            else:
+                winner_name = first_name if result.winner == first_id else second_name
+                loser_name = "bot_b" if winner_name == "bot_a" else "bot_a"
+                wins[winner_name] += 1
+                losses[loser_name] += 1
+
+            if viewer is not None and hasattr(viewer, "set_records"):
+                viewer.set_records(
+                    {
+                        first_id: (wins[first_name], losses[first_name]),
+                        second_id: (wins[second_name], losses[second_name]),
+                    }
+                )
+    finally:
+        if viewer is not None:
+            typer.echo("GUI series complete. Close the game window when finished viewing.")
+            viewer.wait_until_closed()
+            viewer.close()
 
     summary = SeriesSummary(
         game_id=game,
@@ -170,6 +217,45 @@ def run_series(
     typer.echo(f"series_games={games} wins_bot_a={wins['bot_a']} wins_bot_b={wins['bot_b']} draws={draws}")
     typer.echo(f"first_player_bot_a={first_player_counts['bot_a']} first_player_bot_b={first_player_counts['bot_b']}")
     typer.echo(f"summary={summary_file}")
+
+
+@app.command("run-bracket")
+def run_bracket_cmd(
+    game: str = typer.Option("battleship", help="Game id to run."),
+    bots: str = typer.Option(
+        ...,
+        help="Comma-separated list of competing bots, in seed order, e.g. "
+        "'greedy,random,player:mark,player:example_player'.",
+    ),
+    games_per_match: int = typer.Option(
+        3, min=1, help="Number of games each matchup plays (alternating who goes first)."
+    ),
+    seed: int | None = typer.Option(
+        None, help="Optional base seed for reproducible matches."
+    ),
+    output_dir: Path = typer.Option(
+        Path("artifacts/bracket"), help="Directory for per-game replay files and the bracket summary."
+    ),
+) -> None:
+    registry = build_registry()
+    game_impl = registry.get(game)
+
+    entrants = [name.strip() for name in bots.split(",") if name.strip()]
+
+    bracket = run_bracket(
+        game_id=game,
+        game_impl=game_impl,
+        entrants=entrants,
+        games_per_match=games_per_match,
+        output_dir=output_dir,
+        seed_base=seed,
+    )
+
+    typer.echo(bracket_to_text(bracket))
+
+    summary_file = output_dir / "bracket_summary.json"
+    summary_file.write_text(_to_pretty_json(bracket_to_dict(bracket)), encoding="utf-8")
+    typer.echo(f"\nsummary={summary_file}")
 
 
 @app.command("replay")
@@ -211,47 +297,6 @@ def encode_bot(
     typer.echo("present, so remove or .gitignore bot.py once you're ready to go blind).")
 
 
-def _build_bot(game_impl: GameProtocol, bot_name: str, bot_id: str, game_id: str) -> BotProtocol:
-    name = bot_name.lower().strip()
-    if name.startswith("player:"):
-        player_name = name.split(":", maxsplit=1)[1].strip()
-        return _load_player_bot(game_id=game_id, player_name=player_name, bot_id=bot_id)
-    return game_impl.build_baseline_bot(name, bot_id)
-
-
-def _load_player_bot(game_id: str, player_name: str, bot_id: str) -> BotProtocol:
-    if not player_name:
-        raise ValueError("Player bot name cannot be empty. Use player:<folder_name>.")
-
-    bot_dir = Path(__file__).resolve().parent.parent / "games" / game_id / "bots" / "players" / player_name
-    source_file = bot_dir / "bot.py"
-    encoded_file = bot_dir / "bot.pyc"
-    module_name = f"gamenight_{game_id}_player_{player_name}"
-
-    if source_file.exists():
-        bot_file: Path = source_file
-        spec = importlib.util.spec_from_file_location(module_name, bot_file)
-    elif encoded_file.exists():
-        # No source present — this is a "blind" submission shared via `encode-bot`.
-        # SourcelessFileLoader runs compiled bytecode directly, with no .py needed.
-        bot_file = encoded_file
-        loader = importlib.machinery.SourcelessFileLoader(module_name, str(bot_file))
-        spec = importlib.util.spec_from_file_location(module_name, bot_file, loader=loader)
-    else:
-        raise FileNotFoundError(f"Neither bot.py nor bot.pyc found in {bot_dir}")
-
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load module spec for {bot_file}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    if not hasattr(module, "PlayerBot"):
-        raise AttributeError(f"Expected class 'PlayerBot' in {bot_file}")
-
-    return module.PlayerBot(bot_id=bot_id)
-
-
 def _series_first_player(
     policy: str,
     game_index: int,
@@ -280,7 +325,7 @@ def _to_pretty_json(data: Any) -> str:
     return json.dumps(data, indent=2)
 
 
-def _build_viewer(game_id: str, matchup_label: str) -> GameViewerProtocol:
+def _build_viewer(game_id: str, matchup_label: str | None) -> GameViewerProtocol:
     if game_id == "tictactoe":
         from gamenight.games.tictactoe.gui import TicTacToeViewer
 
@@ -296,12 +341,17 @@ def _build_viewer(game_id: str, matchup_label: str) -> GameViewerProtocol:
     raise typer.BadParameter(f"GUI mode is not yet implemented for game '{game_id}'.")
 
 
-def _run_gui_match(
+def _run_gui_game(
     game_impl: GameProtocol,
     bots: dict[str, BotProtocol],
     gui_delay: float,
     viewer: GameViewerProtocol,
+    seed: int | None = None,
 ):
+    """Run a single game against a live viewer. Caller owns the viewer's lifecycle
+    (set_names/set_records before and after, wait_until_closed/close when fully done) --
+    this just plays one game and updates the board as it goes."""
+
     def step_observer(event: dict) -> None:
         viewer.update_state(
             state=event["state"],
@@ -310,18 +360,21 @@ def _run_gui_match(
             action=event["action"],
         )
 
-    try:
-        result = run_match_with_observer(
-            game=game_impl,
-            bots=bots,
-            step_observer=step_observer,
-            turn_delay_s=max(0.0, gui_delay),
-        )
-        typer.echo("GUI match complete. Close the game window when finished viewing.")
-        viewer.wait_until_closed()
-        return result
-    finally:
-        viewer.close()
+    return run_match_with_observer(
+        game=game_impl,
+        bots=bots,
+        seed=seed,
+        step_observer=step_observer,
+        turn_delay_s=max(0.0, gui_delay),
+    )
+
+
+def _single_game_records(result: MatchResult, first_id: str, second_id: str) -> dict[str, tuple[int, int]]:
+    if result.winner == first_id:
+        return {first_id: (1, 0), second_id: (0, 1)}
+    if result.winner == second_id:
+        return {first_id: (0, 1), second_id: (1, 0)}
+    return {first_id: (0, 0), second_id: (0, 0)}
 
 
 if __name__ == "__main__":

@@ -60,17 +60,22 @@ class BattleshipViewer:
         boards.pack(padx=20)
 
         self.canvases: dict[str, tk.Canvas] = {}
+        self.name_vars: dict[str, tk.StringVar] = {}
+        self.record_vars: dict[str, tk.StringVar] = {}
         first_id, second_id = "player_blue", "player_orange"
         for column, player_id in enumerate((first_id, second_id)):
             side = tk.Frame(boards, bg="#0a2538")
             side.grid(row=0, column=column, padx=14)
+
+            name_var = tk.StringVar(value=player_id)
             tk.Label(
                 side,
-                text=player_id,
+                textvariable=name_var,
                 font=("Helvetica", 13, "bold"),
                 fg=PLAYER_COLORS[player_id],
                 bg="#0a2538",
             ).pack(pady=(0, 6))
+
             canvas = tk.Canvas(
                 side,
                 width=BOARD_SIZE * CELL_SIZE,
@@ -81,6 +86,18 @@ class BattleshipViewer:
             canvas.pack()
             self.canvases[player_id] = canvas
 
+            record_var = tk.StringVar(value="Wins: 0   Losses: 0")
+            tk.Label(
+                side,
+                textvariable=record_var,
+                font=("Helvetica", 11),
+                fg="#9fb6c9",
+                bg="#0a2538",
+            ).pack(pady=(6, 0))
+
+            self.name_vars[player_id] = name_var
+            self.record_vars[player_id] = record_var
+
         legend = (
             "Ships are revealed for spectators only -- bots never see the opponent's fleet.   "
             "Steel = ship   Dark = sunk   Red ring = hit   Pale ring = miss"
@@ -88,6 +105,20 @@ class BattleshipViewer:
         tk.Label(self.root, text=legend, font=("Helvetica", 10), fg="#9fb6c9", bg="#0a2538", wraplength=width - 40).pack(
             pady=(10, 12)
         )
+
+    def set_names(self, names: dict[str, str]) -> None:
+        """Set the label shown above each player's board (e.g. their bot spec)."""
+        for player_id, name in names.items():
+            if player_id in self.name_vars:
+                self.name_vars[player_id].set(name)
+        self.root.update_idletasks()
+
+    def set_records(self, records: dict[str, tuple[int, int]]) -> None:
+        """Set the wins/losses shown below each player's board, as {player_id: (wins, losses)}."""
+        for player_id, (wins, losses) in records.items():
+            if player_id in self.record_vars:
+                self.record_vars[player_id].set(f"Wins: {wins}   Losses: {losses}")
+        self.root.update_idletasks()
 
     def update_state(
         self,
