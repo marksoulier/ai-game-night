@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
+from collections import defaultdict
 
 from gamenight.core.types import Action, MatchContext, Observation
 
@@ -143,47 +145,274 @@ class PlayerBot:
     def reset(self, context: MatchContext) -> None:
         return None
 
+    def _is_valid_placement_with_guard(self, action: Action, legal_actions: list[Action], 
+                                       existing_placements: list[list[int]], context_ships: list, guard_region: int = 2) -> bool:
+        """Check if placement respects guard region (2-block buffer) around existing ships."""
+        row, col = action["row"], action["col"]
+        orientation = action["orientation"]
+        ship_name = action.get("ship")
+        
+        # Get ship length from context
+        ship_length = 0
+        for ship in context_ships:
+            if ship["name"] == ship_name:
+                ship_length = ship["length"]
+                break
+        
+        if ship_length == 0:
+            return False
+        
+        # Get ship cells for this placement
+        if orientation == "horizontal":
+            placement_cells = [[row, col + i] for i in range(ship_length)]
+        else:
+            placement_cells = [[row + i, col] for i in range(ship_length)]
+        
+        # Check if any placement cell is within guard_region of existing ships
+        for placed_cell in existing_placements:
+            for new_cell in placement_cells:
+                dist = abs(placed_cell[0] - new_cell[0]) + abs(placed_cell[1] - new_cell[1])
+                if dist < guard_region:
+                    return False
+        return True
+
+    def _get_ship_length(self, action: Action, context: MatchContext) -> int:
+        """Infer ship length from the action (need to look at legal actions or context)."""
+        # Extract from context ships list based on ship name in action
+        if "ship" in action:
+            for ship in context.get("ships", []):
+                if ship["name"] == action["ship"]:
+                    return ship["length"]
+        return 0
+
+    def _calculate_ship_density_map(self, observation: Observation) -> list[list[float]]:
+        """Bayesian probabilistic map: estimate where opponent's remaining ships are likely positioned."""
+        tracking_grid = observation["private_state"]["tracking_grid"]
+        board_size = observation["context"]["board_size"]
+        ships = observation["context"]["ships"]
+        
+        # Get remaining ship sizes (not sunk)
+        remaining_ships = ships.copy()
+        for shot in observation["private_state"]["your_shots"]:
+            if shot["ship"]:  # Sunk ship
+                remaining_ships = [s for s in remaining_ships if s["name"] != shot["ship"]]
+        
+        if not remaining_ships:
+            # All ships sunk, shouldn't happen but handle gracefully
+            return [[0.0 for _ in range(board_size)] for _ in range(board_size)]
+        
+        # Initialize probability map
+        prob_map = [[0.0 for _ in range(board_size)] for _ in range(board_size)]
+        
+        # For each cell, calculate likelihood a ship occupies it
+        for row in range(board_size):
+            for col in range(board_size):
+                cell_state = tracking_grid[row][col]
+                
+                # Skip cells we know about - definitely penalize them
+                if cell_state in ["M", "X"]:
+                    prob_map[row][col] = 0.0
+                    continue
+                
+                # Hits are weighted higher (ships definitely there)
+                if cell_state == "H":
+                    prob_map[row][col] = 10.0
+                    continue
+                
+                # For unknown cells, count valid placements
+                count = 0
+                for ship in remaining_ships:
+                    length = ship["length"]
+                    
+                    # Check horizontal placements that include this cell
+                    for start_col in range(max(0, col - length + 1), min(board_size - length + 1, col + 1)):
+                        # Check if all cells in this placement are valid
+                        valid = True
+                        for check_col in range(start_col, start_col + length):
+                            grid_cell = tracking_grid[row][check_col]
+                            # Can place if unknown or hit
+                            if grid_cell not in ["?", "H"]:
+                                valid = False
+                                break
+                        if valid:
+                            count += 1
+                    
+                    # Check vertical placements that include this cell
+                    for start_row in range(max(0, row - length + 1), min(board_size - length + 1, row + 1)):
+                        # Check if all cells in this placement are valid
+                        valid = True
+                        for check_row in range(start_row, start_row + length):
+                            grid_cell = tracking_grid[check_row][col]
+                            # Can place if unknown or hit
+                            if grid_cell not in ["?", "H"]:
+                                valid = False
+                                break
+                        if valid:
+                            count += 1
+                
+                prob_map[row][col] = float(count)
+        
+        # Normalize (but keep hits high)
+        max_prob = max(max(row) for row in prob_map) or 1.0
+        for row in range(board_size):
+            for col in range(board_size):
+                if tracking_grid[row][col] != "H":
+                    prob_map[row][col] /= max_prob
+        
+        return prob_map
+
     def choose_action(self, observation: Observation, context: MatchContext) -> Action:
-        """Tanner's minimal battleship strategy:
-        - Placement: spread ships across the board (every 2-3 cells)
-        - Battle: hunt adjacent cells after a hit, otherwise use checkerboard
+        """Tanner's TURBO battleship bot:
+        - Placement: random with 70% guard region enforcement
+        - Battle: hunt established vectors, then Bayesian probabilistic targeting
         """
         legal_actions = observation["legal_actions"]
+        phase = observation["public_state"]["phase"]
         
-        # Placement phase: pick placements that spread the fleet out
-        if observation["public_state"]["phase"] == "placement":
-            # Prefer placements that are spaced away from board edges
-            # and distributed across different areas
-            for action in legal_actions:
-                row, col = action["row"], action["col"]
-                # Prefer mid-board placements (rows/cols 2-7)
-                if 2 <= row <= 7 and 2 <= col <= 7:
-                    return action
-            # If no mid-board option, take any legal placement
-            return legal_actions[0]
+        # ===== PLACEMENT PHASE =====
+        if phase == "placement":
+            use_strict_guard = random.random() < 0.7
+            
+            # Collect existing placements from your_fleet
+            existing_placements = []
+            your_fleet = observation["private_state"]["your_fleet"]
+            for ship in your_fleet:
+                existing_placements.extend(ship["cells"])
+            
+            context_ships = observation["context"]["ships"]
+            
+            # Always enforce some guard region - 70% strict (2-cell), 30% relaxed (1-cell)
+            guard_distance = 2 if use_strict_guard else 1
+            valid_actions = [
+                action for action in legal_actions
+                if self._is_valid_placement_with_guard(action, legal_actions, existing_placements, context_ships, guard_region=guard_distance)
+            ]
+            
+            if valid_actions:
+                return random.choice(valid_actions)
+            
+            # Fallback: if no valid guard placement found, try looser guard
+            if use_strict_guard:
+                valid_actions = [
+                    action for action in legal_actions
+                    if self._is_valid_placement_with_guard(action, legal_actions, existing_placements, context_ships, guard_region=1)
+                ]
+                if valid_actions:
+                    return random.choice(valid_actions)
+            
+            # Last resort: pick random (shouldn't happen often)
+            return random.choice(legal_actions)
         
-        # Battle phase: hunt and target
+        # ===== BATTLE PHASE =====
         else:
             tracking_grid = observation["private_state"]["tracking_grid"]
+            your_shots = observation["private_state"]["your_shots"]
             
-            # Look for unhit "H" (hit but not sunk) and target its neighbors
+            # Step 1: Hunt established hit vectors
+            hit_cells = []
             for row in range(10):
                 for col in range(10):
                     if tracking_grid[row][col] == "H":
-                        # Try to fire at orthogonal neighbors
-                        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            nr, nc = row + dr, col + dc
-                            if 0 <= nr < 10 and 0 <= nc < 10:
-                                # Check if this cell is a legal action (not already fired at)
-                                neighbor_action = {"type": "fire", "row": nr, "col": nc}
-                                if neighbor_action in legal_actions:
-                                    return neighbor_action
+                        hit_cells.append([row, col])
             
-            # No adjacent hits to pursue: use checkerboard pattern
-            # Fire at cells where (row + col) is even, for good coverage
-            for action in legal_actions:
-                if (action["row"] + action["col"]) % 2 == 0:
-                    return action
+            if hit_cells:
+                # Try to establish vector and continue hunting
+                best_hunt_action = self._hunt_hits(hit_cells, tracking_grid, legal_actions)
+                if best_hunt_action:
+                    return best_hunt_action
             
-            # Fallback: take first legal action
+            # Step 2: Distributed search pattern - space out shots
+            # Use a distributed grid-based approach for maximum board coverage
+            distributed_actions = self._get_distributed_search_actions(tracking_grid, legal_actions)
+            if distributed_actions:
+                return distributed_actions[0]
+            
+            # Fallback
             return legal_actions[0]
+    
+    def _get_distributed_search_actions(self, tracking_grid: list[list[str]], legal_actions: list[Action]) -> list[Action]:
+        """Get distributed search pattern - prioritize cells that spread coverage across board."""
+        # Create distribution by quadrants and spacing
+        candidates_by_coverage = defaultdict(list)
+        
+        for action in legal_actions:
+            row, col = action["row"], action["col"]
+            
+            # Calculate coverage score: prefer cells far from already-fired areas
+            min_distance_to_known = 100
+            for check_row in range(10):
+                for check_col in range(10):
+                    if tracking_grid[check_row][check_col] in ["M", "H", "X"]:
+                        dist = abs(row - check_row) + abs(col - check_col)
+                        min_distance_to_known = min(min_distance_to_known, dist)
+            
+            # Prefer cells that are far from known shots (spreading out)
+            coverage_score = min_distance_to_known
+            candidates_by_coverage[coverage_score].append(action)
+        
+        # Return actions with highest coverage score (furthest from known shots)
+        if candidates_by_coverage:
+            best_score = max(candidates_by_coverage.keys())
+            return candidates_by_coverage[best_score]
+        
+        return legal_actions
+
+    def _hunt_hits(self, hit_cells: list[list[int]], tracking_grid: list[list[str]], 
+                   legal_actions: list[Action]) -> Action | None:
+        """Hunt adjacent cells around hits, establishing vector of attack with priority."""
+        if not hit_cells:
+            return None
+        
+        priority_candidates = []
+        secondary_candidates = []
+        
+        for hit_row, hit_col in hit_cells:
+            # Check if there's another hit in the same row (horizontal ship)
+            horizontal_hits = [h for h in hit_cells if h[0] == hit_row and h[1] != hit_col]
+            if horizontal_hits:
+                # Narrow along the row - find endpoints
+                all_cols = [hit_col] + [h[1] for h in horizontal_hits]
+                min_col = min(all_cols)
+                max_col = max(all_cols)
+                # Fire beyond the cluster (high priority)
+                for nc in [min_col - 1, max_col + 1]:
+                    if 0 <= nc < 10:
+                        action = {"type": "fire", "row": hit_row, "col": nc}
+                        if action in legal_actions and tracking_grid[hit_row][nc] == "?":
+                            priority_candidates.append(action)
+            
+            # Check if there's another hit in the same column (vertical ship)
+            vertical_hits = [h for h in hit_cells if h[1] == hit_col and h[0] != hit_row]
+            if vertical_hits:
+                # Narrow along the column - find endpoints
+                all_rows = [hit_row] + [h[0] for h in vertical_hits]
+                min_row = min(all_rows)
+                max_row = max(all_rows)
+                # Fire beyond the cluster (high priority)
+                for nr in [min_row - 1, max_row + 1]:
+                    if 0 <= nr < 10:
+                        action = {"type": "fire", "row": nr, "col": hit_col}
+                        if action in legal_actions and tracking_grid[nr][hit_col] == "?":
+                            priority_candidates.append(action)
+        
+        # Prioritize established lines first
+        if priority_candidates:
+            return random.choice(priority_candidates)
+        
+        # No established line yet - collect orthogonal neighbors more conservatively
+        seen = set()
+        for hit_row, hit_col in hit_cells:
+            directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+            for dr, dc in directions:
+                nr, nc = hit_row + dr, hit_col + dc
+                if 0 <= nr < 10 and 0 <= nc < 10 and (nr, nc) not in seen:
+                    if tracking_grid[nr][nc] == "?":
+                        action = {"type": "fire", "row": nr, "col": nc}
+                        if action in legal_actions:
+                            secondary_candidates.append(action)
+                            seen.add((nr, nc))
+        
+        if secondary_candidates:
+            return random.choice(secondary_candidates)
+        
+        return None
