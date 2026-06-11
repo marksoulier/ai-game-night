@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 
 from gamenight.core.types import Action, MatchContext, Observation
+
+BOARD_SIZE = 10
+ORTHOGONAL_NEIGHBORS = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
 
 # ---------------------------------------------------------------------------------
@@ -139,106 +143,212 @@ class BattleshipObservation:
 class PlayerBot:
     def __init__(self, bot_id: str) -> None:
         self.bot_id = bot_id
+        self._pending_hits: list[tuple[int, int]] = []
 
     def reset(self, context: MatchContext) -> None:
-        return None
+        self._pending_hits = []
 
     def choose_action(self, observation: Observation, context: MatchContext) -> Action:
-        """Decide what to play this turn — replace this with your own strategy.
+        if observation["public_state"]["phase"] == "placement":
+            return self._choose_placement(observation, context)
+        return self._choose_target(observation)
 
-        `observation` is typed as a plain dict because every game has a different shape
-        (that's all your editor can tell you). Battleship has **two phases** and
-        **hidden information**, so its shape is bigger than Connect Four's — but the
-        same three-part split applies: `public_state` (what's true for everyone),
-        `private_state` (what only YOU would know), and `context` (fixed facts about
-        the match). The full field-by-field reference lives in ../../../BOT_SPEC.md,
-        with a complete worked example in ../../../EXAMPLES.md — this docstring is the
-        "show me in the code, right where I'm reading and writing it" version:
+    def _choose_placement(self, observation: Observation, context: MatchContext) -> Action:
+        legal_actions = observation["legal_actions"]
+        board_size = observation["context"]["board_size"]
+        ship_lengths = {ship["name"]: ship["length"] for ship in observation["context"]["ships"]}
+        ship_order = [ship["name"] for ship in observation["context"]["ships"]]
+        ship_name = observation["context"]["next_ship_to_place"]
+        ship_index = ship_order.index(ship_name) if ship_name in ship_order else 0
+        preferred_edge = ship_index % 4
+        center = (board_size - 1) / 2
 
-            observation = {
-                "public_state": {
-                    "phase": "placement",       # "placement" | "battle"
-                    "current_player": "...",    # whose turn it is right now
-                    "turn_index": 0,            # int >= 0, +1 every move (either phase)
-                    "done": False,              # bool — True once the match has ended
-                    "winner": "..." | None,     # winner id, or None while still going
-                    "points": {"player_blue": 17, "player_orange": 17},  # cells not yet hit
-                },
-                "private_state": {
-                    # Your own fleet — fully known to you, never redacted.
-                    "your_fleet": [
-                        {
-                            "name": "carrier",          # carrier/battleship/cruiser/submarine/destroyer
-                            "length": 5,                # int, cells the ship occupies
-                            "cells": [[r, c], ...],     # every [row, col] this ship occupies (0-9, 0-9)
-                            "hits": [[r, c], ...],      # which of those cells the opponent has hit
-                            "sunk": False,              # bool — True once every cell has been hit
-                        },
-                        ...
-                    ],
-                    # Your own 10x10 waters: your ships + every shot fired AT you.
-                    #   "~" empty water   "S" your ship   "H" your ship, hit
-                    #   "X" your ship, hit & sunk   "M" opponent fired here, missed
-                    "your_board": [["~", "S", ...], ...],   # 10 rows x 10 cols, row 0 = top
-                    # The shots YOU have fired at the opponent, in order:
-                    "your_shots": [
-                        {"row": 3, "col": 7, "result": "hit", "ship": None},
-                        # "result" is "miss" | "hit" | "sunk". "ship" is the opponent's
-                        # ship NAME, but ONLY once you've sunk it — a plain "hit" never
-                        # tells you which ship it was. The instant a ship sinks, every
-                        # earlier shot of yours that contributed to it is retroactively
-                        # relabeled with that ship's name, "sunk" with that ship's name.
-                        ...
-                    ],
-                    # The same shot history as a 10x10 grid for quick lookups:
-                    #   "?" unknown   "M" miss   "H" hit (ship unknown)   "X" hit & sunk
-                    "tracking_grid": [["?", "?", ...], ...],  # 10 rows x 10 cols, row 0 = top
-                },
-                "context": {
-                    "opponent_id": "...",       # the other player's id
-                    "board_size": 10,           # board is board_size x board_size (constant)
-                    "ships": [                  # the fixed fleet every player places, in order
-                        {"name": "carrier", "length": 5},
-                        {"name": "battleship", "length": 4},
-                        {"name": "cruiser", "length": 3},
-                        {"name": "submarine", "length": 3},
-                        {"name": "destroyer", "length": 2},
-                    ],
-                    "next_ship_to_place": "carrier" | None,  # set during YOUR placement turns
-                },
-                "legal_actions": [...],   # shape differs by phase, see below
-            }
+        def score(action: Action) -> tuple[int, int, float, int, int]:
+            cells = self._cells_for(
+                action["row"],
+                action["col"],
+                ship_lengths[action["ship"]],
+                action["orientation"],
+            )
+            preferred_edge_cells = sum(
+                1
+                for row, col in cells
+                if (
+                    (preferred_edge == 0 and row == 0)
+                    or (preferred_edge == 1 and col == board_size - 1)
+                    or (preferred_edge == 2 and row == board_size - 1)
+                    or (preferred_edge == 3 and col == 0)
+                )
+            )
+            any_edge_cells = sum(
+                1
+                for row, col in cells
+                if row in {0, board_size - 1} or col in {0, board_size - 1}
+            )
+            distance_from_center = sum(abs(row - center) + abs(col - center) for row, col in cells)
+            noise_seed = f"{context.seed}:{self.bot_id}:{ship_name}:{action['row']}:{action['col']}:{action['orientation']}"
+            noise = random.Random(noise_seed).random()
+            return (preferred_edge_cells, any_edge_cells, distance_from_center, noise, -action["row"], -action["col"])
 
-        Prefer typed attribute access over dict lookups? Build a `BattleshipObservation`
-        from the dict above (defined earlier in this file) — entirely optional:
+        return max(legal_actions, key=score)
 
-            obs = BattleshipObservation.from_dict(observation)
-            if obs.public_state.phase == "battle":
-                ...
+    @staticmethod
+    def _cells_for(row: int, col: int, length: int, orientation: str) -> list[tuple[int, int]]:
+        if orientation == "horizontal":
+            return [(row, col + offset) for offset in range(length)]
+        return [(row + offset, col) for offset in range(length)]
 
-        **Placement-phase actions** look like:
-            {"type": "place_ship", "ship": "carrier", "row": 4, "col": 2, "orientation": "horizontal"}
-        `legal_actions` enumerates every in-bounds, non-overlapping placement for
-        whichever ship is next in your fleet order (`context.next_ship_to_place`) —
-        largest (carrier, 5) to smallest (destroyer, 2), one at a time. `(row, col)` is
-        the ship's first cell; "horizontal" extends rightward, "vertical" downward.
+    def _choose_target(self, observation: Observation) -> Action:
+        legal_actions = observation["legal_actions"]
+        legal_cells = {(action["row"], action["col"]): action for action in legal_actions}
+        tracking = observation["private_state"]["tracking_grid"]
 
-        **Battle-phase actions** look like:
-            {"type": "fire", "row": 3, "col": 7}
-        `legal_actions` enumerates every cell on the opponent's board you haven't
-        already fired at.
+        self._refresh_pending_hits(tracking)
 
-        What you must return: exactly one of the dicts already sitting in
-        `observation["legal_actions"]`. Anything else (wrong shape, an out-of-bounds or
-        overlapping placement, a cell you've already fired at) is rejected by the engine.
+        line_target = self._extend_known_line(legal_cells)
+        if line_target is not None:
+            return line_target
 
-        A reasonable first upgrade from "always play legal_actions[0]" (which places
-        every ship in the same top-left corner and fires in a fixed left-to-right sweep
-        — easy to predict and exactly the kind of clustering that hands an opponent your
-        whole fleet once they land one hit): once you're in "battle" and `tracking_grid`
-        shows an "H" you haven't sunk yet, fire at one of its orthogonal neighbors rather
-        than continuing your sweep — see bots/baselines/greedy_bot.py for a fuller
-        hunt-and-target implementation (checkerboard hunting + line-narrowing) plus a
-        "spread your fleet out" placement heuristic.
-        """
-        return observation["legal_actions"][0]
+        adjacent_target = self._target_next_to_hit(legal_cells)
+        if adjacent_target is not None:
+            return adjacent_target
+
+        return self._best_probability_target(legal_actions, tracking, observation)
+
+    def _best_probability_target(
+        self,
+        legal_actions: list[Action],
+        tracking: list[list[str]],
+        observation: Observation,
+    ) -> Action:
+        legal_cells = {(action["row"], action["col"]): action for action in legal_actions}
+        scores: dict[tuple[int, int], float] = {cell: 0.0 for cell in legal_cells}
+        remaining_lengths = self._remaining_ship_lengths(observation)
+        has_open_hits = any(cell == "H" for row in tracking for cell in row)
+
+        for length in remaining_lengths:
+            for orientation in ("horizontal", "vertical"):
+                max_row = BOARD_SIZE if orientation == "horizontal" else BOARD_SIZE - length + 1
+                max_col = BOARD_SIZE - length + 1 if orientation == "horizontal" else BOARD_SIZE
+                for row in range(max_row):
+                    for col in range(max_col):
+                        cells = self._cells_for(row, col, length, orientation)
+                        if any(tracking[cell_row][cell_col] in {"M", "X"} for cell_row, cell_col in cells):
+                            continue
+
+                        hit_overlap = sum(1 for cell_row, cell_col in cells if tracking[cell_row][cell_col] == "H")
+                        if has_open_hits and hit_overlap == 0:
+                            continue
+
+                        placement_weight = 1.0 + hit_overlap * 4.0
+                        for cell_row, cell_col in cells:
+                            if (cell_row, cell_col) in scores:
+                                scores[(cell_row, cell_col)] += placement_weight
+
+        if all(score == 0.0 for score in scores.values()):
+            for (row, col), action in legal_cells.items():
+                scores[(row, col)] = float(
+                    sum(1 for d_row, d_col in ORTHOGONAL_NEIGHBORS if tracking[row + d_row][col + d_col] == "H")
+                )
+                if (row + col) % 2 == 0:
+                    scores[(row, col)] += 0.25
+
+        return max(legal_actions, key=lambda action: (scores[(action["row"], action["col"])] , -action["row"], -action["col"]))
+
+    def _refresh_pending_hits(self, tracking: list[list[str]]) -> None:
+        self._pending_hits = [(row, col) for row, col in self._pending_hits if tracking[row][col] == "H"]
+        for row in range(BOARD_SIZE):
+            for col in range(BOARD_SIZE):
+                if tracking[row][col] == "H" and (row, col) not in self._pending_hits:
+                    self._pending_hits.append((row, col))
+
+    def _remaining_ship_lengths(self, observation: Observation) -> list[int]:
+        sunk_ships = {shot["ship"] for shot in observation["private_state"]["your_shots"] if shot["ship"]}
+        return [ship["length"] for ship in observation["context"]["ships"] if ship["name"] not in sunk_ships]
+
+    def _target_next_to_hit(self, legal_cells: dict[tuple[int, int], Action]) -> Action | None:
+        for row, col in reversed(self._pending_hits):
+            for d_row, d_col in ORTHOGONAL_NEIGHBORS:
+                candidate = (row + d_row, col + d_col)
+                if candidate in legal_cells:
+                    return legal_cells[candidate]
+        return None
+
+    def _extend_known_line(self, legal_cells: dict[tuple[int, int], Action]) -> Action | None:
+        if len(self._pending_hits) < 2:
+            return None
+
+        rows = {row for row, _ in self._pending_hits}
+        cols = {col for _, col in self._pending_hits}
+
+        if len(rows) == 1:
+            row = next(iter(rows))
+            ordered_cols = sorted(col for _, col in self._pending_hits)
+            if ordered_cols[-1] - ordered_cols[0] == len(ordered_cols) - 1:
+                for candidate in [(row, ordered_cols[0] - 1), (row, ordered_cols[-1] + 1)]:
+                    if candidate in legal_cells:
+                        return legal_cells[candidate]
+
+        if len(cols) == 1:
+            col = next(iter(cols))
+            ordered_rows = sorted(row for row, _ in self._pending_hits)
+            if ordered_rows[-1] - ordered_rows[0] == len(ordered_rows) - 1:
+                for candidate in [(ordered_rows[0] - 1, col), (ordered_rows[-1] + 1, col)]:
+                    if candidate in legal_cells:
+                        return legal_cells[candidate]
+
+        return None
+
+    def _score_targets(
+        self,
+        observation: Observation,
+        legal_cells: dict[tuple[int, int], Action],
+        tracking: list[list[str]],
+    ) -> dict[Action, float]:
+        board_size = observation["context"]["board_size"]
+        remaining_lengths = self._remaining_ship_lengths(observation)
+        score_by_action: dict[Action, float] = {action: 0.0 for action in legal_cells.values()}
+
+        for length in remaining_lengths:
+            for orientation in ("horizontal", "vertical"):
+                for row in range(board_size):
+                    for col in range(board_size):
+                        cells = self._cells_for(row, col, length, orientation)
+                        if not self._placement_is_consistent(cells, tracking):
+                            continue
+
+                        hit_cells = [(cell_row, cell_col) for cell_row, cell_col in cells if tracking[cell_row][cell_col] == "H"]
+                        cluster_bonus = 1.0 + len(hit_cells)
+                        for cell_row, cell_col in cells:
+                            action = legal_cells.get((cell_row, cell_col))
+                            if action is None:
+                                continue
+                            score_by_action[action] += cluster_bonus
+
+        for action in score_by_action:
+            row = action["row"]
+            col = action["col"]
+            if (row, col) in self._pending_hits:
+                score_by_action[action] += 6.0
+            elif any((abs(row - hit_row) + abs(col - hit_col)) == 1 for hit_row, hit_col in self._pending_hits):
+                score_by_action[action] += 3.0
+            elif (row + col) % 2 == 0:
+                score_by_action[action] += 0.25
+
+        return score_by_action
+
+    def _remaining_ship_lengths(self, observation: Observation) -> list[int]:
+        ships = observation["context"]["ships"]
+        sunk_names = {shot["ship"] for shot in observation["private_state"]["your_shots"] if shot["result"] == "sunk" and shot["ship"]}
+        return [ship["length"] for ship in ships if ship["name"] not in sunk_names]
+
+    def _placement_is_consistent(self, cells: list[tuple[int, int]], tracking: list[list[str]]) -> bool:
+        hit_count = 0
+        for row, col in cells:
+            cell_state = tracking[row][col]
+            if cell_state == "M" or cell_state == "X":
+                return False
+            if cell_state == "H":
+                hit_count += 1
+
+        return hit_count > 0 or not self._pending_hits
