@@ -236,7 +236,7 @@ class PlayerBot:
 
     def _is_stale_search(self, observation: Observation) -> bool:
         turn_index = observation["public_state"]["turn_index"]
-        return (turn_index - self._last_hit_turn) >= 60
+        return (turn_index - self._last_hit_turn) >= 78
 
     def _inverted_heatmap_target(
         self,
@@ -264,10 +264,10 @@ class PlayerBot:
 
         rng = self._match_rng(observation, context)
         ranked_actions = sorted(legal_actions, key=lambda action: inverted_scores[(action["row"], action["col"])], reverse=True)
-        temperature = max(0.2, self._target_temperature(observation, tracking) * 0.5)
-        cutoff = max(1, len(ranked_actions) // 3)
+        temperature = max(0.15, self._target_temperature(observation, tracking) * 0.35)
+        cutoff = max(1, len(ranked_actions) // 10)
 
-        if rng.random() < 0.25:
+        if rng.random() < 0.1:
             return rng.choice(ranked_actions[:cutoff])
 
         top_action = ranked_actions[0]
@@ -286,10 +286,10 @@ class PlayerBot:
         rng = self._match_rng(observation, context)
         temperature = self._target_temperature(observation, tracking)
 
-        exploration_chance = min(0.2, max(0.04, temperature * 0.08))
+        exploration_chance = min(0.08, max(0.015, temperature * 0.03))
         if rng.random() < exploration_chance:
             ranked_actions = sorted(legal_actions, key=lambda action: scores[(action["row"], action["col"])], reverse=True)
-            cutoff = max(1, len(ranked_actions) // 4)
+            cutoff = max(1, len(ranked_actions) // 12)
             return rng.choice(ranked_actions[:cutoff])
 
         best_score = max(scores.values())
@@ -300,7 +300,7 @@ class PlayerBot:
         if all(score == 0.0 for score in shifted):
             return rng.choice(legal_actions)
 
-        softmax_temperature = max(0.15, temperature * 0.6)
+        softmax_temperature = max(0.12, temperature * 0.35)
         max_shifted = max(shifted)
         weights = [math.exp((score - max_shifted) / softmax_temperature) for score in shifted]
         return rng.choices(legal_actions, weights=weights, k=1)[0]
@@ -447,9 +447,9 @@ class PlayerBot:
         turn_index = observation["public_state"]["turn_index"]
         open_hits = sum(1 for row in tracking for cell in row if cell == "H")
         remaining_lengths = self._remaining_ship_lengths(observation)
-        base = 1.5 if open_hits == 0 else 0.8
-        decay = 0.05 * turn_index + 0.12 * max(0, len(remaining_lengths) - 1)
-        return max(0.25, base - decay)
+        base = 1.1 if open_hits == 0 else 0.6
+        decay = 0.045 * turn_index + 0.1 * max(0, len(remaining_lengths) - 1)
+        return max(0.2, base - decay)
 
     def _match_rng(self, observation: Observation, context: MatchContext) -> random.Random:
         turn_index = observation["public_state"]["turn_index"]
