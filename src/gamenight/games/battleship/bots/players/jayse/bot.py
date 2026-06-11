@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import random
 
 from gamenight.core.types import Action, MatchContext, Observation
@@ -144,14 +145,16 @@ class PlayerBot:
     def __init__(self, bot_id: str) -> None:
         self.bot_id = bot_id
         self._pending_hits: list[tuple[int, int]] = []
+        self._last_hit_turn: int = 0
 
     def reset(self, context: MatchContext) -> None:
         self._pending_hits = []
+        self._last_hit_turn = 0
 
     def choose_action(self, observation: Observation, context: MatchContext) -> Action:
         if observation["public_state"]["phase"] == "placement":
             return self._choose_placement(observation, context)
-        return self._choose_target(observation)
+        return self._choose_target(observation, context)
 
     def _choose_placement(self, observation: Observation, context: MatchContext) -> Action:
         legal_actions = observation["legal_actions"]
@@ -198,12 +201,14 @@ class PlayerBot:
             return [(row, col + offset) for offset in range(length)]
         return [(row + offset, col) for offset in range(length)]
 
-    def _choose_target(self, observation: Observation) -> Action:
+    def _choose_target(self, observation: Observation, context: MatchContext) -> Action:
         legal_actions = observation["legal_actions"]
         legal_cells = {(action["row"], action["col"]): action for action in legal_actions}
         tracking = observation["private_state"]["tracking_grid"]
 
         self._refresh_pending_hits(tracking)
+        self._refresh_last_hit_turn(observation)
+        stale_search = self._is_stale_search(observation)
 
         line_target = self._extend_known_line(legal_cells)
         if line_target is not None:
@@ -213,7 +218,92 @@ class PlayerBot:
         if adjacent_target is not None:
             return adjacent_target
 
+        if not self._pending_hits:
+            if stale_search:
+                return self._inverted_heatmap_target(legal_actions, tracking, observation, context)
+            return self._annealed_probe_target(legal_actions, tracking, observation, context)
+
         return self._best_probability_target(legal_actions, tracking, observation)
+
+    def _refresh_last_hit_turn(self, observation: Observation) -> None:
+        your_shots = observation["private_state"]["your_shots"]
+        if not your_shots:
+            return
+
+        last_shot = your_shots[-1]
+        if last_shot["result"] in {"hit", "sunk"}:
+            self._last_hit_turn = observation["public_state"]["turn_index"]
+
+    def _is_stale_search(self, observation: Observation) -> bool:
+        turn_index = observation["public_state"]["turn_index"]
+        return (turn_index - self._last_hit_turn) >= 78
+
+    def _inverted_heatmap_target(
+        self,
+        legal_actions: list[Action],
+        tracking: list[list[str]],
+        observation: Observation,
+        context: MatchContext,
+    ) -> Action:
+        scores = self._target_scores(legal_actions, tracking, observation)
+        inverted_scores = {cell: -score for cell, score in scores.items()}
+
+        board_size = observation["context"]["board_size"]
+        for action in legal_actions:
+            row = action["row"]
+            col = action["col"]
+            edge_bonus = 0.0
+            corner_bonus = 0.0
+            if row in {0, board_size - 1}:
+                edge_bonus += 2.0
+            if col in {0, board_size - 1}:
+                edge_bonus += 2.0
+            if row in {0, board_size - 1} and col in {0, board_size - 1}:
+                corner_bonus = 1.5
+            inverted_scores[(row, col)] += edge_bonus + corner_bonus
+
+        rng = self._match_rng(observation, context)
+        ranked_actions = sorted(legal_actions, key=lambda action: inverted_scores[(action["row"], action["col"])], reverse=True)
+        temperature = max(0.15, self._target_temperature(observation, tracking) * 0.35)
+        cutoff = max(1, len(ranked_actions) // 10)
+
+        if rng.random() < 0.1:
+            return rng.choice(ranked_actions[:cutoff])
+
+        top_action = ranked_actions[0]
+        top_score = inverted_scores[(top_action["row"], top_action["col"])]
+        weights = [math.exp((inverted_scores[(action["row"], action["col"])] - top_score) / temperature) for action in ranked_actions[:cutoff]]
+        return rng.choices(ranked_actions[:cutoff], weights=weights, k=1)[0]
+
+    def _annealed_probe_target(
+        self,
+        legal_actions: list[Action],
+        tracking: list[list[str]],
+        observation: Observation,
+        context: MatchContext,
+    ) -> Action:
+        scores = self._target_scores(legal_actions, tracking, observation)
+        rng = self._match_rng(observation, context)
+        temperature = self._target_temperature(observation, tracking)
+
+        exploration_chance = min(0.08, max(0.015, temperature * 0.03))
+        if rng.random() < exploration_chance:
+            ranked_actions = sorted(legal_actions, key=lambda action: scores[(action["row"], action["col"])], reverse=True)
+            cutoff = max(1, len(ranked_actions) // 12)
+            return rng.choice(ranked_actions[:cutoff])
+
+        best_score = max(scores.values())
+        if best_score <= 0.0:
+            return rng.choice(legal_actions)
+
+        shifted = [max(score, 0.0) for score in scores.values()]
+        if all(score == 0.0 for score in shifted):
+            return rng.choice(legal_actions)
+
+        softmax_temperature = max(0.12, temperature * 0.35)
+        max_shifted = max(shifted)
+        weights = [math.exp((score - max_shifted) / softmax_temperature) for score in shifted]
+        return rng.choices(legal_actions, weights=weights, k=1)[0]
 
     def _best_probability_target(
         self,
@@ -221,6 +311,15 @@ class PlayerBot:
         tracking: list[list[str]],
         observation: Observation,
     ) -> Action:
+        scores = self._target_scores(legal_actions, tracking, observation)
+        return max(legal_actions, key=lambda action: (scores[(action["row"], action["col"])] , -action["row"], -action["col"]))
+
+    def _target_scores(
+        self,
+        legal_actions: list[Action],
+        tracking: list[list[str]],
+        observation: Observation,
+    ) -> dict[tuple[int, int], float]:
         legal_cells = {(action["row"], action["col"]): action for action in legal_actions}
         scores: dict[tuple[int, int], float] = {cell: 0.0 for cell in legal_cells}
         remaining_lengths = self._remaining_ship_lengths(observation)
@@ -241,6 +340,8 @@ class PlayerBot:
                             continue
 
                         placement_weight = 1.0 + hit_overlap * 4.0
+                        if length == max(remaining_lengths):
+                            placement_weight *= 1.5
                         for cell_row, cell_col in cells:
                             if (cell_row, cell_col) in scores:
                                 scores[(cell_row, cell_col)] += placement_weight
@@ -253,7 +354,7 @@ class PlayerBot:
                 if (row + col) % 2 == 0:
                     scores[(row, col)] += 0.25
 
-        return max(legal_actions, key=lambda action: (scores[(action["row"], action["col"])] , -action["row"], -action["col"]))
+        return scores
 
     def _refresh_pending_hits(self, tracking: list[list[str]]) -> None:
         self._pending_hits = [(row, col) for row, col in self._pending_hits if tracking[row][col] == "H"]
@@ -341,6 +442,19 @@ class PlayerBot:
         ships = observation["context"]["ships"]
         sunk_names = {shot["ship"] for shot in observation["private_state"]["your_shots"] if shot["result"] == "sunk" and shot["ship"]}
         return [ship["length"] for ship in ships if ship["name"] not in sunk_names]
+
+    def _target_temperature(self, observation: Observation, tracking: list[list[str]]) -> float:
+        turn_index = observation["public_state"]["turn_index"]
+        open_hits = sum(1 for row in tracking for cell in row if cell == "H")
+        remaining_lengths = self._remaining_ship_lengths(observation)
+        base = 1.1 if open_hits == 0 else 0.6
+        decay = 0.045 * turn_index + 0.1 * max(0, len(remaining_lengths) - 1)
+        return max(0.2, base - decay)
+
+    def _match_rng(self, observation: Observation, context: MatchContext) -> random.Random:
+        turn_index = observation["public_state"]["turn_index"]
+        seed_value = f"{context.seed}:{self.bot_id}:{turn_index}:{observation['public_state']['current_player']}"
+        return random.Random(seed_value)
 
     def _placement_is_consistent(self, cells: list[tuple[int, int]], tracking: list[list[str]]) -> bool:
         hit_count = 0
