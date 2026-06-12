@@ -33,5 +33,18 @@ Each match writes a replay artifact containing ordered events:
 - state snapshot
 - rewards
 - done
+- bot_error
 
 This allows game-dependent rendering with shared replay controls.
+
+## Bot Error Handling
+
+A bot's `choose_action` may raise, or may return something that isn't in
+`legal_actions`. Either case is caught per-turn: the engine substitutes
+`legal_actions[0]`, records a human-readable message in that turn's
+`bot_error` field (otherwise `None`), and play continues normally.
+
+This keeps a single misbehaving bot from crashing an entire series/bracket
+run — every other match still completes and its replay is saved. Reviewing
+`bot_error` across a replay is the way to spot a bot that's silently playing
+fallback moves all game.

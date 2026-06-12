@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import glob
 import hashlib
 import py_compile
+import re
 import secrets
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -10,7 +13,14 @@ from typing import Any
 import typer
 
 from gamenight.core.bots import build_bot
-from gamenight.core.bracket import bracket_to_dict, bracket_to_text, run_bracket
+from gamenight.core.bracket import (
+    bracket_to_dict,
+    bracket_to_text,
+    run_bracket,
+    run_tournament,
+    tournament_to_dict,
+    tournament_to_text,
+)
 from gamenight.core.match import (
     MatchResult,
     load_replay_file,
@@ -258,6 +268,57 @@ def run_bracket_cmd(
     typer.echo(f"\nsummary={summary_file}")
 
 
+@app.command("run-tournament")
+def run_tournament_cmd(
+    game: str = typer.Option("battleship", help="Game id to run."),
+    bots: str = typer.Option(
+        ...,
+        help="Comma-separated list of competing bots, e.g. "
+        "'greedy,random,player:mark,player:example_player'. The order is shuffled "
+        "before play (see --shuffle-seed).",
+    ),
+    bracket_games: int = typer.Option(
+        3, min=1, help="Number of games each bracket matchup plays (alternating who goes first)."
+    ),
+    round_robin_games: int = typer.Option(
+        1, min=1, help="Number of games each round-robin matchup plays (alternating who goes first)."
+    ),
+    shuffle_seed: int | None = typer.Option(
+        None, help="Optional seed for shuffling entrant order before the round robin."
+    ),
+    seed: int | None = typer.Option(
+        None, help="Optional base seed for reproducible matches."
+    ),
+    output_dir: Path = typer.Option(
+        Path("artifacts/tournament"), help="Directory for per-game replay files and the tournament summary."
+    ),
+) -> None:
+    """Run a full tournament: shuffle the entrants, play a round robin, seed a
+    single-elimination bracket from the round robin standings, then run the bracket.
+    """
+    registry = build_registry()
+    game_impl = registry.get(game)
+
+    entrants = [name.strip() for name in bots.split(",") if name.strip()]
+
+    tournament = run_tournament(
+        game_id=game,
+        game_impl=game_impl,
+        entrants=entrants,
+        bracket_games_per_match=bracket_games,
+        round_robin_games_per_match=round_robin_games,
+        output_dir=output_dir,
+        seed_base=seed,
+        shuffle_seed=shuffle_seed,
+    )
+
+    typer.echo(tournament_to_text(tournament))
+
+    summary_file = output_dir / "tournament_summary.json"
+    summary_file.write_text(_to_pretty_json(tournament_to_dict(tournament)), encoding="utf-8")
+    typer.echo(f"\nsummary={summary_file}")
+
+
 @app.command("replay")
 def replay(
     replay_file: Path = typer.Option(..., exists=True, file_okay=True, dir_okay=False),
@@ -265,6 +326,127 @@ def replay(
 ) -> None:
     replay_events = load_replay_file(replay_file)
     typer.echo(replay_to_text(replay_events, max_rows=rows))
+
+
+@app.command("replay-bracket-gui")
+def replay_bracket_gui(
+    bracket_dir: Path = typer.Option(
+        Path("artifacts/bracket"),
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="Directory containing tournament_summary.json or bracket_summary.json and the "
+        "per-game replay files they reference (produced by `run-tournament` or `run-bracket`).",
+    ),
+    first_game_delay: float = typer.Option(
+        0.5, help="Delay (seconds) between turns for each match's first game."
+    ),
+    rest_delay: float = typer.Option(
+        0.05, help="Delay (seconds) between turns for every game after a match's first."
+    ),
+    final: bool = typer.Option(
+        False,
+        "--final",
+        help="Skip the reveal animation and immediately show the completed bracket "
+        "(all winners/scores filled in, final standings, champion) plus the final "
+        "board state of the championship match.",
+    ),
+) -> None:
+    """Open a bracket "reveal" GUI: shows the full bracket with later rounds blank,
+    and a "Play Next Match" button that replays each match's saved games (first game
+    slow, the rest fast) on an embedded board, then fills in the winner -- propagating
+    it into the next round -- until the champion is revealed.
+
+    If a `tournament_summary.json` is present (from `run-tournament`), the round robin
+    standings, round robin results, and live overall standings are also displayed.
+    """
+    import json
+
+    summary_file = bracket_dir / "tournament_summary.json"
+    if not summary_file.exists():
+        summary_file = bracket_dir / "bracket_summary.json"
+    if not summary_file.exists():
+        raise typer.BadParameter(f"No tournament_summary.json or bracket_summary.json found in {bracket_dir}")
+
+    summary = json.loads(summary_file.read_text(encoding="utf-8"))
+
+    if summary["game_id"] != "battleship":
+        raise typer.BadParameter(
+            f"replay-bracket-gui currently only supports battleship brackets (got '{summary['game_id']}')."
+        )
+
+    from gamenight.games.battleship.bracket_gui import BracketRevealViewer
+
+    viewer = BracketRevealViewer(
+        summary, bracket_dir, first_game_delay=first_game_delay, rest_delay=rest_delay, show_final=final
+    )
+    try:
+        viewer.run()
+    finally:
+        viewer.close()
+
+
+_GAME_NUMBER_RE = re.compile(r"_game(\d+)\.json$")
+
+
+@app.command("replay-series-gui")
+def replay_series_gui(
+    game: str = typer.Option("battleship", help="Game id (selects the GUI viewer)."),
+    replay_glob: str = typer.Option(
+        ...,
+        help="Glob pattern matching saved replay JSON files for one series, e.g. "
+        "'artifacts/bracket/round2_match1_random_vs_player-mark_game*.json'. "
+        "Files are played in order of their trailing _gameN number.",
+    ),
+    first_game_delay: float = typer.Option(
+        0.5, help="Delay (seconds) between turns for the first replay file."
+    ),
+    rest_delay: float = typer.Option(
+        0.05, help="Delay (seconds) between turns for every replay file after the first."
+    ),
+) -> None:
+    """Replay a saved series of games live in the GUI.
+
+    The first replay file plays slowly (so you can follow placement and early shots),
+    then every remaining file plays fast. This re-renders saved state snapshots only --
+    no bots run and nothing is recomputed, so it's an exact replay of what happened.
+    """
+    paths = [Path(p) for p in glob.glob(replay_glob)]
+    if not paths:
+        raise typer.BadParameter(f"No replay files matched: {replay_glob}")
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        match = _GAME_NUMBER_RE.search(path.name)
+        return (int(match.group(1)) if match else 1 << 30, path.name)
+
+    paths.sort(key=sort_key)
+
+    matchup_label = paths[0].stem.rsplit("_game", 1)[0].replace("_", " ")
+    viewer = _build_viewer(game, matchup_label)
+
+    try:
+        for index, path in enumerate(paths):
+            delay = first_game_delay if index == 0 else rest_delay
+            replay_events = load_replay_file(path)
+            typer.echo(f"Replaying {path} ({len(replay_events)} turns, delay={delay}s)")
+            for event in replay_events:
+                if viewer.closed:
+                    break
+                viewer.update_state(
+                    state=event["state"],
+                    turn=event["turn"],
+                    acting_player=event["player_id"],
+                    action=event["action"],
+                )
+                if delay > 0:
+                    time.sleep(delay)
+            if viewer.closed:
+                break
+
+        typer.echo("Replay complete. Close the game window when finished viewing.")
+        viewer.wait_until_closed()
+    finally:
+        viewer.close()
 
 
 @app.command("encode-bot")

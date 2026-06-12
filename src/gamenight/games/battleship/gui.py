@@ -132,9 +132,9 @@ class BattleshipViewer:
 
         for player_id, canvas in self.canvases.items():
             opponent_id = "player_orange" if player_id == "player_blue" else "player_blue"
-            self._draw_board(canvas, state["fleets"][player_id], state["shots"][opponent_id])
+            draw_board(canvas, state["fleets"][player_id], state["shots"][opponent_id])
 
-        self.status_var.set(self._status_text(state, turn, acting_player, action))
+        self.status_var.set(status_text(state, turn, acting_player, action))
 
         self.root.update_idletasks()
         self.root.update()
@@ -151,94 +151,99 @@ class BattleshipViewer:
     def _on_close(self) -> None:
         self.close()
 
-    # -- drawing ----------------------------------------------------------------------
 
-    def _draw_board(self, canvas: tk.Canvas, fleet: list[dict], incoming_shots: list[dict]) -> None:
-        canvas.delete("all")
-        size = BOARD_SIZE * CELL_SIZE
-        canvas.create_rectangle(0, 0, size, size, fill=WATER_COLOR, outline="")
-        for i in range(BOARD_SIZE + 1):
-            canvas.create_line(0, i * CELL_SIZE, size, i * CELL_SIZE, fill=GRID_LINE_COLOR)
-            canvas.create_line(i * CELL_SIZE, 0, i * CELL_SIZE, size, fill=GRID_LINE_COLOR)
+# -- drawing (module-level: reusable by other viewers, e.g. bracket_gui) -------------
 
-        for ship in fleet:
-            self._draw_ship(canvas, ship)
 
-        for shot in incoming_shots:
-            self._draw_shot_marker(canvas, shot)
+def draw_board(canvas: tk.Canvas, fleet: list[dict], incoming_shots: list[dict]) -> None:
+    canvas.delete("all")
+    size = BOARD_SIZE * CELL_SIZE
+    canvas.create_rectangle(0, 0, size, size, fill=WATER_COLOR, outline="")
+    for i in range(BOARD_SIZE + 1):
+        canvas.create_line(0, i * CELL_SIZE, size, i * CELL_SIZE, fill=GRID_LINE_COLOR)
+        canvas.create_line(i * CELL_SIZE, 0, i * CELL_SIZE, size, fill=GRID_LINE_COLOR)
 
-    def _draw_ship(self, canvas: tk.Canvas, ship: dict) -> None:
-        cells = ship["cells"]
-        rows = [cell[0] for cell in cells]
-        cols = [cell[1] for cell in cells]
-        x0 = min(cols) * CELL_SIZE + SHIP_MARGIN
-        y0 = min(rows) * CELL_SIZE + SHIP_MARGIN
-        x1 = (max(cols) + 1) * CELL_SIZE - SHIP_MARGIN
-        y1 = (max(rows) + 1) * CELL_SIZE - SHIP_MARGIN
+    for ship in fleet:
+        _draw_ship(canvas, ship)
 
-        fill = SUNK_SHIP_COLOR if ship["sunk"] else SHIP_COLOR
-        canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline=SHIP_OUTLINE, width=2)
+    for shot in incoming_shots:
+        _draw_shot_marker(canvas, shot)
 
-        if not ship["sunk"]:
-            mid_x, mid_y = (x0 + x1) / 2, (y0 + y1) / 2
-            if max(cols) > min(cols):
-                canvas.create_line(x0 + 6, mid_y, x1 - 6, mid_y, fill=SHIP_HIGHLIGHT, width=2)
-            else:
-                canvas.create_line(mid_x, y0 + 6, mid_x, y1 - 6, fill=SHIP_HIGHLIGHT, width=2)
+
+def _draw_ship(canvas: tk.Canvas, ship: dict) -> None:
+    cells = ship["cells"]
+    rows = [cell[0] for cell in cells]
+    cols = [cell[1] for cell in cells]
+    x0 = min(cols) * CELL_SIZE + SHIP_MARGIN
+    y0 = min(rows) * CELL_SIZE + SHIP_MARGIN
+    x1 = (max(cols) + 1) * CELL_SIZE - SHIP_MARGIN
+    y1 = (max(rows) + 1) * CELL_SIZE - SHIP_MARGIN
+
+    fill = SUNK_SHIP_COLOR if ship["sunk"] else SHIP_COLOR
+    canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline=SHIP_OUTLINE, width=2)
+
+    if not ship["sunk"]:
+        mid_x, mid_y = (x0 + x1) / 2, (y0 + y1) / 2
+        if max(cols) > min(cols):
+            canvas.create_line(x0 + 6, mid_y, x1 - 6, mid_y, fill=SHIP_HIGHLIGHT, width=2)
         else:
-            canvas.create_line(x0 + 4, y0 + 4, x1 - 4, y1 - 4, fill=SUNK_MARK_COLOR, width=3)
-            canvas.create_line(x0 + 4, y1 - 4, x1 - 4, y0 + 4, fill=SUNK_MARK_COLOR, width=3)
+            canvas.create_line(mid_x, y0 + 6, mid_x, y1 - 6, fill=SHIP_HIGHLIGHT, width=2)
+    else:
+        canvas.create_line(x0 + 4, y0 + 4, x1 - 4, y1 - 4, fill=SUNK_MARK_COLOR, width=3)
+        canvas.create_line(x0 + 4, y1 - 4, x1 - 4, y0 + 4, fill=SUNK_MARK_COLOR, width=3)
 
-    def _draw_shot_marker(self, canvas: tk.Canvas, shot: dict) -> None:
-        center_x = shot["col"] * CELL_SIZE + CELL_SIZE / 2
-        center_y = shot["row"] * CELL_SIZE + CELL_SIZE / 2
-        if shot["result"] in ("hit", "sunk"):
-            radius = CELL_SIZE * 0.27
-            canvas.create_oval(
-                center_x - radius, center_y - radius, center_x + radius, center_y + radius,
-                fill=HIT_COLOR, outline=HIT_OUTLINE, width=2,
-            )
-            canvas.create_line(center_x - radius * 0.5, center_y, center_x + radius * 0.5, center_y, fill=HIT_OUTLINE, width=2)
-            canvas.create_line(center_x, center_y - radius * 0.5, center_x, center_y + radius * 0.5, fill=HIT_OUTLINE, width=2)
-        else:
-            radius = CELL_SIZE * 0.20
-            canvas.create_oval(
-                center_x - radius, center_y - radius, center_x + radius, center_y + radius,
-                outline=MISS_OUTLINE, fill=MISS_COLOR, width=2,
-            )
 
-    # -- status -------------------------------------------------------------------------
-
-    def _status_text(
-        self,
-        state: dict,
-        turn: int | None,
-        acting_player: str | None,
-        action: dict | None,
-    ) -> str:
-        if state["done"]:
-            return f"Game over -- winner is {state['winner']}"
-
-        if turn is None or acting_player is None or action is None:
-            current = state["current_player"]
-            if state["phase"] == "placement":
-                ship_name, ship_length = SHIPS[len(state["fleets"][current])]
-                return f"Placement: {current} is placing their {ship_name} ({ship_length} cells)"
-            return f"Battle: {current} to fire"
-
-        if action.get("type") == "place_ship":
-            return (
-                f"Turn {turn}: {acting_player} placed their {action['ship']} "
-                f"at ({action['row']}, {action['col']}), {action['orientation']}"
-            )
-
-        last_shot = state["shots"][acting_player][-1]
-        outcomes = {
-            "miss": "missed",
-            "hit": "scored a hit",
-            "sunk": f"sank the {last_shot['ship']}",
-        }
-        return (
-            f"Turn {turn}: {acting_player} fired at ({last_shot['row']}, {last_shot['col']}) "
-            f"-- {outcomes[last_shot['result']]}"
+def _draw_shot_marker(canvas: tk.Canvas, shot: dict) -> None:
+    center_x = shot["col"] * CELL_SIZE + CELL_SIZE / 2
+    center_y = shot["row"] * CELL_SIZE + CELL_SIZE / 2
+    if shot["result"] in ("hit", "sunk"):
+        radius = CELL_SIZE * 0.27
+        canvas.create_oval(
+            center_x - radius, center_y - radius, center_x + radius, center_y + radius,
+            fill=HIT_COLOR, outline=HIT_OUTLINE, width=2,
         )
+        canvas.create_line(center_x - radius * 0.5, center_y, center_x + radius * 0.5, center_y, fill=HIT_OUTLINE, width=2)
+        canvas.create_line(center_x, center_y - radius * 0.5, center_x, center_y + radius * 0.5, fill=HIT_OUTLINE, width=2)
+    else:
+        radius = CELL_SIZE * 0.20
+        canvas.create_oval(
+            center_x - radius, center_y - radius, center_x + radius, center_y + radius,
+            outline=MISS_OUTLINE, fill=MISS_COLOR, width=2,
+        )
+
+
+# -- status ----------------------------------------------------------------------------
+
+
+def status_text(
+    state: dict,
+    turn: int | None,
+    acting_player: str | None,
+    action: dict | None,
+) -> str:
+    if state["done"]:
+        return f"Game over -- winner is {state['winner']}"
+
+    if turn is None or acting_player is None or action is None:
+        current = state["current_player"]
+        if state["phase"] == "placement":
+            ship_name, ship_length = SHIPS[len(state["fleets"][current])]
+            return f"Placement: {current} is placing their {ship_name} ({ship_length} cells)"
+        return f"Battle: {current} to fire"
+
+    if action.get("type") == "place_ship":
+        return (
+            f"Turn {turn}: {acting_player} placed their {action['ship']} "
+            f"at ({action['row']}, {action['col']}), {action['orientation']}"
+        )
+
+    last_shot = state["shots"][acting_player][-1]
+    outcomes = {
+        "miss": "missed",
+        "hit": "scored a hit",
+        "sunk": f"sank the {last_shot['ship']}",
+    }
+    return (
+        f"Turn {turn}: {acting_player} fired at ({last_shot['row']}, {last_shot['col']}) "
+        f"-- {outcomes[last_shot['result']]}"
+    )

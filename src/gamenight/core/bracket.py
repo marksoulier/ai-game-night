@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,27 @@ class BracketResult:
     games_per_match: int
     entrants: list[str]
     rounds: list[list[SeriesResult]]
+    champion: str
+
+
+@dataclass(slots=True)
+class RoundRobinResult:
+    game_id: str
+    games_per_match: int
+    entrants: list[str]
+    matches: list[SeriesResult]
+    standings: dict[str, dict[str, int]]
+
+
+@dataclass(slots=True)
+class TournamentResult:
+    game_id: str
+    entrants: list[str]
+    shuffled_entrants: list[str]
+    round_robin: RoundRobinResult
+    seeded_entrants: list[str]
+    bracket: BracketResult
+    overall_standings: dict[str, dict[str, int]]
     champion: str
 
 
@@ -120,6 +142,146 @@ def run_bracket(
         entrants=list(entrants),
         rounds=rounds,
         champion=current[0],
+    )
+
+
+def run_round_robin(
+    game_id: str,
+    game_impl: GameProtocol,
+    entrants: list[str],
+    games_per_match: int,
+    output_dir: Path,
+    seed_base: int | None = None,
+) -> RoundRobinResult:
+    """Play every pair of `entrants` against each other once (a series of
+    `games_per_match` games, alternating who goes first), recording a win/loss
+    for each entrant per series. Replay files are written for every game played.
+    """
+    if len(entrants) < 2:
+        raise ValueError("A round robin needs at least two entrants.")
+    if len(set(entrants)) != len(entrants):
+        raise ValueError("Entrant names must be unique.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    standings: dict[str, dict[str, int]] = {name: {"wins": 0, "losses": 0} for name in entrants}
+    matches: list[SeriesResult] = []
+    match_index = 0
+
+    for i in range(len(entrants)):
+        for j in range(i + 1, len(entrants)):
+            bot_a, bot_b = entrants[i], entrants[j]
+            match_index += 1
+            series_seed = None if seed_base is None else seed_base + match_index
+            series = _run_series(
+                game_id=game_id,
+                game_impl=game_impl,
+                bot_a=bot_a,
+                bot_b=bot_b,
+                games_per_match=games_per_match,
+                round_index=0,
+                match_index=match_index,
+                output_dir=output_dir,
+                seed_base=series_seed,
+            )
+            matches.append(series)
+
+            loser = bot_b if series.winner == bot_a else bot_a
+            standings[series.winner]["wins"] += 1
+            standings[loser]["losses"] += 1
+
+    return RoundRobinResult(
+        game_id=game_id,
+        games_per_match=games_per_match,
+        entrants=list(entrants),
+        matches=matches,
+        standings=standings,
+    )
+
+
+def _seed_order(ranked: list[str]) -> list[str]:
+    """Cross/snake-pair a ranked list (best first) into bracket seed order, e.g.
+    [1, 2, 3, 4] -> [1, 4, 2, 3] so the bracket pairs 1-vs-4 and 2-vs-3.
+    """
+    order: list[str] = []
+    i, j = 0, len(ranked) - 1
+    while i <= j:
+        order.append(ranked[i])
+        if i != j:
+            order.append(ranked[j])
+        i += 1
+        j -= 1
+    return order
+
+
+def run_tournament(
+    game_id: str,
+    game_impl: GameProtocol,
+    entrants: list[str],
+    bracket_games_per_match: int,
+    round_robin_games_per_match: int,
+    output_dir: Path,
+    seed_base: int | None = None,
+    shuffle_seed: int | None = None,
+) -> TournamentResult:
+    """Run a full tournament: shuffle the entrants, play a round robin, seed a
+    single-elimination bracket from the round robin standings (best vs worst,
+    cross-paired), then run the bracket. `overall_standings` combines round
+    robin and bracket wins/losses per entrant.
+    """
+    rng = random.Random(shuffle_seed)
+    shuffled = list(entrants)
+    rng.shuffle(shuffled)
+
+    round_robin = run_round_robin(
+        game_id=game_id,
+        game_impl=game_impl,
+        entrants=shuffled,
+        games_per_match=round_robin_games_per_match,
+        output_dir=output_dir / "round_robin",
+        seed_base=seed_base,
+    )
+
+    ranked = sorted(
+        shuffled,
+        key=lambda name: (
+            -round_robin.standings[name]["wins"],
+            round_robin.standings[name]["losses"],
+            shuffled.index(name),
+        ),
+    )
+    seeded_entrants = _seed_order(ranked)
+
+    bracket_seed_base = None if seed_base is None else seed_base + 500_000
+    bracket = run_bracket(
+        game_id=game_id,
+        game_impl=game_impl,
+        entrants=seeded_entrants,
+        games_per_match=bracket_games_per_match,
+        output_dir=output_dir / "bracket",
+        seed_base=bracket_seed_base,
+    )
+
+    overall_standings: dict[str, dict[str, int]] = {
+        name: dict(round_robin.standings[name]) for name in entrants
+    }
+    for round_results in bracket.rounds:
+        for series in round_results:
+            if series.bye:
+                continue
+            loser = series.bot_b if series.winner == series.bot_a else series.bot_a
+            overall_standings[series.winner]["wins"] += 1
+            overall_standings[loser]["losses"] += 1
+
+    return TournamentResult(
+        game_id=game_id,
+        entrants=list(entrants),
+        shuffled_entrants=shuffled,
+        round_robin=round_robin,
+        seeded_entrants=seeded_entrants,
+        bracket=bracket,
+        overall_standings=overall_standings,
+        champion=bracket.champion,
     )
 
 
@@ -230,6 +392,32 @@ def _series_winner(
     return bot_a, "bracket-order"
 
 
+def _series_to_dict(series: SeriesResult) -> dict[str, Any]:
+    return {
+        "round_index": series.round_index,
+        "match_index": series.match_index,
+        "bot_a": series.bot_a,
+        "bot_b": series.bot_b,
+        "bye": series.bye,
+        "wins": series.wins,
+        "points": series.points,
+        "winner": series.winner,
+        "tiebreak": series.tiebreak,
+        "games": [
+            {
+                "game_index": game.game_index,
+                "first_bot": game.first_bot,
+                "second_bot": game.second_bot,
+                "winner": game.winner,
+                "turns": game.turns,
+                "points": game.points,
+                "replay_file": game.replay_file,
+            }
+            for game in series.games
+        ],
+    }
+
+
 def bracket_to_dict(bracket: BracketResult) -> dict[str, Any]:
     return {
         "game_id": bracket.game_id,
@@ -237,34 +425,27 @@ def bracket_to_dict(bracket: BracketResult) -> dict[str, Any]:
         "entrants": bracket.entrants,
         "champion": bracket.champion,
         "rounds": [
-            [
-                {
-                    "round_index": series.round_index,
-                    "match_index": series.match_index,
-                    "bot_a": series.bot_a,
-                    "bot_b": series.bot_b,
-                    "bye": series.bye,
-                    "wins": series.wins,
-                    "points": series.points,
-                    "winner": series.winner,
-                    "tiebreak": series.tiebreak,
-                    "games": [
-                        {
-                            "game_index": game.game_index,
-                            "first_bot": game.first_bot,
-                            "second_bot": game.second_bot,
-                            "winner": game.winner,
-                            "turns": game.turns,
-                            "points": game.points,
-                            "replay_file": game.replay_file,
-                        }
-                        for game in series.games
-                    ],
-                }
-                for series in round_results
-            ]
+            [_series_to_dict(series) for series in round_results]
             for round_results in bracket.rounds
         ],
+    }
+
+
+def tournament_to_dict(tournament: TournamentResult) -> dict[str, Any]:
+    return {
+        "game_id": tournament.game_id,
+        "entrants": tournament.entrants,
+        "shuffled_entrants": tournament.shuffled_entrants,
+        "seeded_entrants": tournament.seeded_entrants,
+        "champion": tournament.champion,
+        "overall_standings": tournament.overall_standings,
+        "round_robin": {
+            "games_per_match": tournament.round_robin.games_per_match,
+            "entrants": tournament.round_robin.entrants,
+            "standings": tournament.round_robin.standings,
+            "matches": [_series_to_dict(series) for series in tournament.round_robin.matches],
+        },
+        "bracket": bracket_to_dict(tournament.bracket),
     }
 
 
@@ -284,4 +465,44 @@ def bracket_to_text(bracket: BracketResult) -> str:
                 line += f" (tiebreak: {series.tiebreak}, points {points_a}-{points_b})"
             lines.append(line)
     lines.append(f"\nChampion: {bracket.champion}")
+    return "\n".join(lines)
+
+
+def tournament_to_text(tournament: TournamentResult) -> str:
+    lines = [f"Tournament: {tournament.game_id}"]
+    lines.append(f"Entrants (shuffled order): {', '.join(tournament.shuffled_entrants)}")
+
+    lines.append("\n-- Round Robin --")
+    for series in tournament.round_robin.matches:
+        score = f"{series.wins[series.bot_a]}-{series.wins[series.bot_b]}"
+        line = f"  {series.bot_a} vs {series.bot_b}: {score} -> winner {series.winner}"
+        if series.tiebreak:
+            points_a, points_b = series.points[series.bot_a], series.points[series.bot_b]
+            line += f" (tiebreak: {series.tiebreak}, points {points_a}-{points_b})"
+        lines.append(line)
+
+    lines.append("\n-- Round Robin Standings --")
+    standings = tournament.round_robin.standings
+    ranked = sorted(
+        tournament.shuffled_entrants,
+        key=lambda name: (-standings[name]["wins"], standings[name]["losses"]),
+    )
+    for name in ranked:
+        record = standings[name]
+        lines.append(f"  {name}: {record['wins']}-{record['losses']}")
+
+    lines.append(f"\nBracket seeding: {', '.join(tournament.seeded_entrants)}")
+    lines.append("\n" + bracket_to_text(tournament.bracket))
+
+    lines.append("\n-- Overall Standings --")
+    overall = tournament.overall_standings
+    ranked_overall = sorted(
+        tournament.entrants,
+        key=lambda name: (-overall[name]["wins"], overall[name]["losses"]),
+    )
+    for name in ranked_overall:
+        record = overall[name]
+        lines.append(f"  {name}: {record['wins']}-{record['losses']}")
+
+    lines.append(f"\nChampion: {tournament.champion}")
     return "\n".join(lines)

@@ -81,8 +81,16 @@ def _run_match_impl(
         legal_actions = game.legal_actions(state, player_id)
         observation["legal_actions"] = legal_actions
 
-        action = bot.choose_action(observation, context)
+        bot_error: str | None = None
+        try:
+            action = bot.choose_action(observation, context)
+        except Exception as exc:  # noqa: BLE001 - a misbehaving bot must not crash the match
+            bot_error = f"{type(exc).__name__}: {exc}"
+            action = legal_actions[0]
+
         if action not in legal_actions:
+            if bot_error is None:
+                bot_error = f"illegal action returned: {action!r}"
             action = legal_actions[0]
 
         step_result = game.step(state, action)
@@ -94,6 +102,7 @@ def _run_match_impl(
             "events": step_result.events,
             "rewards": step_result.rewards,
             "done": step_result.done,
+            "bot_error": bot_error,
         }
         replay.append(replay_event)
         state = step_result.next_state
