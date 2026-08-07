@@ -12,7 +12,7 @@ from typing import Any
 
 import typer
 
-from gamenight.core.bots import build_bot
+from gamenight.core.bots import GAMES_ROOT, build_bot, load_player_bot
 from gamenight.core.bracket import (
     bracket_to_dict,
     bracket_to_text,
@@ -29,7 +29,9 @@ from gamenight.core.match import (
     save_replay_file,
 )
 from gamenight.core.protocols import BotProtocol, GameProtocol, GameViewerProtocol
+from gamenight.core.registry import GameRegistry
 from gamenight.core.replay import replay_to_text
+from gamenight.core.types import MatchContext
 from gamenight.games import build_registry
 
 app = typer.Typer(no_args_is_help=True)
@@ -62,42 +64,56 @@ def run_game(
     mode: str = typer.Option("headless", help="Runtime mode: headless or gui."),
     bot_1: str = typer.Option(
         "greedy",
-        help="Bot for the first player (game.player_ids[0]): greedy, random, human, or player:<folder_name>.",
+        help="Bot for the first player (game.player_ids[0]): greedy, random, human, or player:<folder_name>. "
+        "Ignored if --bots is given.",
     ),
     bot_2: str = typer.Option(
         "random",
-        help="Bot for the second player (game.player_ids[1]): greedy, random, human, or player:<folder_name>.",
+        help="Bot for the second player (game.player_ids[1]): greedy, random, human, or player:<folder_name>. "
+        "Ignored if --bots is given.",
+    ),
+    bots: str | None = typer.Option(
+        None,
+        help="Comma-separated bots in seat order for an N-player game, e.g. 'greedy,random,player:mark' -- "
+        "overrides --bot-1/--bot-2. Player count must be within the game's supported range (see "
+        "list-games / the game's own README for its MIN_PLAYERS-MAX_PLAYERS, e.g. Splendor is 2-4).",
     ),
     gui_delay: float = typer.Option(0.5, help="Delay (seconds) between GUI turns."),
     replay_file: Path = typer.Option(Path("artifacts/latest_replay.json"), help="Replay output path."),
 ) -> None:
     registry = build_registry()
-    game_impl = registry.get(game)
-    first_id, second_id = game_impl.player_ids[0], game_impl.player_ids[1]
+    bot_names = [name.strip() for name in bots.split(",")] if bots else [bot_1, bot_2]
+    game_impl = _build_game(registry, game, len(bot_names))
+    player_ids = game_impl.player_ids
+    if len(bot_names) != len(player_ids):
+        raise typer.BadParameter(
+            f"Game '{game}' has {len(player_ids)} players ({player_ids}) but {len(bot_names)} bots were given."
+        )
 
-    bots = {
-        first_id: build_bot(game_impl, bot_1, first_id, game),
-        second_id: build_bot(game_impl, bot_2, second_id, game),
-    }
+    bot_map = {pid: build_bot(game_impl, name, pid, game) for pid, name in zip(player_ids, bot_names)}
 
     if mode not in {"headless", "gui"}:
         raise typer.BadParameter("mode must be 'headless' or 'gui'")
 
     if mode == "gui":
-        matchup_label = None if game == "battleship" else f"{first_id} ({bot_1})  vs  {second_id} ({bot_2})"
-        viewer = _build_viewer(game, matchup_label)
+        matchup_label = (
+            None
+            if game == "battleship"
+            else "  vs  ".join(f"{pid} ({name})" for pid, name in zip(player_ids, bot_names))
+        )
+        viewer = _build_viewer(game, matchup_label, player_ids=player_ids)
         if hasattr(viewer, "set_names"):
-            viewer.set_names({first_id: bot_1, second_id: bot_2})
+            viewer.set_names(dict(zip(player_ids, bot_names)))
         try:
-            result = _run_gui_game(game_impl, bots, gui_delay, viewer)
+            result = _run_gui_game(game_impl, bot_map, gui_delay, viewer)
             if hasattr(viewer, "set_records"):
-                viewer.set_records(_single_game_records(result, first_id, second_id))
+                viewer.set_records(_single_game_records(result, player_ids))
             typer.echo("GUI match complete. Close the game window when finished viewing.")
             viewer.wait_until_closed()
         finally:
             viewer.close()
     else:
-        result = run_match(game_impl, bots)
+        result = run_match(game_impl, bot_map)
 
     save_replay_file(result.replay, replay_file)
 
@@ -369,16 +385,9 @@ def replay_bracket_gui(
         raise typer.BadParameter(f"No tournament_summary.json or bracket_summary.json found in {bracket_dir}")
 
     summary = json.loads(summary_file.read_text(encoding="utf-8"))
-
-    if summary["game_id"] != "battleship":
-        raise typer.BadParameter(
-            f"replay-bracket-gui currently only supports battleship brackets (got '{summary['game_id']}')."
-        )
-
-    from gamenight.games.battleship.bracket_gui import BracketRevealViewer
-
-    viewer = BracketRevealViewer(
-        summary, bracket_dir, first_game_delay=first_game_delay, rest_delay=rest_delay, show_final=final
+    viewer = _build_bracket_viewer(
+        summary["game_id"], summary, bracket_dir, first_game_delay=first_game_delay, rest_delay=rest_delay,
+        show_final=final,
     )
     try:
         viewer.run()
@@ -479,6 +488,140 @@ def encode_bot(
     typer.echo("present, so remove or .gitignore bot.py once you're ready to go blind).")
 
 
+@app.command("check-bot-speed")
+def check_bot_speed(
+    game: str = typer.Option("splendor", help="Game id whose player bots to check."),
+    opponent: str = typer.Option(
+        "random",
+        help="Baseline bot filling every other seat while each bot is tested -- kept fast on "
+        "purpose (greedy/human would add their own thinking time) so only the bot under "
+        "test's timing is meaningful.",
+    ),
+    games: int = typer.Option(3, min=1, help="Headless games to play per bot (more games = more sampled actions)."),
+    threshold: float = typer.Option(
+        0.5, help="Warn on any single choose_action call slower than this many seconds."
+    ),
+    only: str | None = typer.Option(
+        None, help="Comma-separated player folder names to check (default: everyone under bots/players/)."
+    ),
+    seed: int | None = typer.Option(None, help="Optional base seed for reproducible games."),
+) -> None:
+    """Time every submitted player bot's `choose_action` calls, one bot at a time
+    (playing against `--opponent` baselines filling every other seat), and warn about
+    anyone slower than `--threshold` per action -- run this before a live tournament,
+    where one slow bot stalls the whole room waiting on it every time it's up.
+
+    Each bot is tested in isolation against baselines, not against each other, so a
+    slow result is attributable to that one bot's own `choose_action` -- nothing else
+    running that game is being timed.
+    """
+    registry = build_registry()
+    game_impl = registry.get(game)
+    max_turns = 200
+
+    players_dir = GAMES_ROOT / game / "bots" / "players"
+    if not players_dir.exists():
+        typer.echo(f"No players directory for game '{game}' ({players_dir}).")
+        raise typer.Exit()
+
+    candidates = sorted(
+        path.name
+        for path in players_dir.iterdir()
+        if path.is_dir() and ((path / "bot.py").exists() or (path / "bot.pyc").exists())
+    )
+    if only:
+        wanted = {name.strip() for name in only.split(",")}
+        missing = wanted - set(candidates)
+        if missing:
+            raise typer.BadParameter(f"No such player folder(s) under {players_dir}: {', '.join(sorted(missing))}")
+        candidates = [name for name in candidates if name in wanted]
+
+    if not candidates:
+        typer.echo(f"No player bots found under {players_dir}.")
+        raise typer.Exit()
+
+    typer.echo(f"Checking {len(candidates)} bot(s) for '{game}': {', '.join(candidates)}")
+    typer.echo(f"({games} game(s) each, vs '{opponent}' filling other seats, threshold {threshold}s/action)\n")
+
+    any_flagged = False
+    rows: list[tuple[str, int, float, float, int]] = []
+
+    for player_name in candidates:
+        durations: list[float] = []
+        error_count = 0
+
+        for game_index in range(games):
+            match_seed = None if seed is None else seed + game_index
+            player_ids = game_impl.player_ids
+            test_seat = player_ids[0]
+
+            bots = {pid: build_bot(game_impl, opponent, pid, game) for pid in player_ids[1:]}
+            bots[test_seat] = load_player_bot(game_id=game, player_name=player_name, bot_id=test_seat)
+
+            context = MatchContext(game_id=game, seed=match_seed, player_ids=player_ids, max_turns=max_turns)
+            for bot in bots.values():
+                bot.reset(context)
+
+            state = game_impl.create_initial_state(seed=match_seed)
+            for _turn in range(max_turns):
+                current = game_impl.current_player(state)
+                legal_actions = game_impl.legal_actions(state, current)
+                observation = game_impl.observe(state, current)
+                observation["legal_actions"] = legal_actions
+                bot = bots[current]
+
+                if current == test_seat:
+                    start = time.perf_counter()
+                    try:
+                        action = bot.choose_action(observation, context)
+                    except Exception:
+                        action = legal_actions[0]
+                        error_count += 1
+                    durations.append(time.perf_counter() - start)
+                else:
+                    action = bot.choose_action(observation, context)
+
+                if action not in legal_actions:
+                    action = legal_actions[0]
+
+                step_result = game_impl.step(state, action)
+                state = step_result.next_state
+                if step_result.done:
+                    break
+
+        mean_s = sum(durations) / len(durations) if durations else 0.0
+        max_s = max(durations) if durations else 0.0
+        rows.append((player_name, len(durations), mean_s, max_s, error_count))
+
+        flagged = max_s > threshold or error_count > 0
+        any_flagged = any_flagged or flagged
+        status = "SLOW" if max_s > threshold else "ok"
+        line = (
+            f"  player:{player_name:<20} actions={len(durations):<4} "
+            f"mean={mean_s * 1000:7.1f}ms  max={max_s * 1000:7.1f}ms  [{status}]"
+        )
+        if error_count:
+            line += f"  ({error_count} action(s) raised -- see below)"
+        typer.echo(line)
+
+        if max_s > threshold:
+            typer.echo(
+                f"    WARNING: player:{player_name} took {max_s:.2f}s on its slowest action "
+                f"(> {threshold:.2f}s threshold) -- too slow for a live tournament."
+            )
+        if error_count:
+            typer.echo(
+                f"    WARNING: player:{player_name} raised an exception on {error_count} action(s) "
+                "(engine fell back to legal_actions[0] each time -- fix before the tournament)."
+            )
+
+    typer.echo("")
+    if any_flagged:
+        typer.echo("Result: one or more bots need attention before the tournament (see WARNINGs above).")
+        raise typer.Exit(code=1)
+    typer.echo(f"Result: all {len(candidates)} bot(s) stayed under {threshold:.2f}s/action with no errors.")
+
+
 def _series_first_player(
     policy: str,
     game_index: int,
@@ -507,7 +650,31 @@ def _to_pretty_json(data: Any) -> str:
     return json.dumps(data, indent=2)
 
 
-def _build_viewer(game_id: str, matchup_label: str | None) -> GameViewerProtocol:
+def _build_game(registry: GameRegistry, game_id: str, num_players: int) -> GameProtocol:
+    """Builds a game instance sized for `num_players`.
+
+    Most games are fixed at 2 players (`registry.get(game_id)` with no kwargs). A game
+    that supports a configurable player count declares `MIN_PLAYERS`/`MAX_PLAYERS`
+    class attributes (see `SplendorGame`) -- for those, requesting a different count
+    than the default re-fetches a freshly-sized instance via `num_players=...`, which
+    the registry's factory (the game class itself) accepts as a constructor kwarg.
+    """
+    default = registry.get(game_id)
+    if num_players == len(default.player_ids):
+        return default
+
+    min_players = getattr(default, "MIN_PLAYERS", len(default.player_ids))
+    max_players = getattr(default, "MAX_PLAYERS", len(default.player_ids))
+    if not (min_players <= num_players <= max_players):
+        raise typer.BadParameter(
+            f"Game '{game_id}' supports {min_players}-{max_players} players, got {num_players}."
+        )
+    return registry.get(game_id, num_players=num_players)
+
+
+def _build_viewer(
+    game_id: str, matchup_label: str | None, player_ids: list[str] | None = None
+) -> GameViewerProtocol:
     if game_id == "tictactoe":
         from gamenight.games.tictactoe.gui import TicTacToeViewer
 
@@ -520,7 +687,31 @@ def _build_viewer(game_id: str, matchup_label: str | None) -> GameViewerProtocol
         from gamenight.games.battleship.gui import BattleshipViewer
 
         return BattleshipViewer(matchup_label=matchup_label)
+    if game_id == "splendor":
+        from gamenight.games.splendor.gui import SplendorViewer
+
+        return SplendorViewer(player_ids=player_ids or ["player_1", "player_2"], matchup_label=matchup_label)
     raise typer.BadParameter(f"GUI mode is not yet implemented for game '{game_id}'.")
+
+
+def _build_bracket_viewer(
+    game_id: str,
+    summary: dict[str, Any],
+    bracket_dir: Path,
+    first_game_delay: float,
+    rest_delay: float,
+    show_final: bool,
+):
+    if game_id == "battleship":
+        from gamenight.games.battleship.bracket_gui import BracketRevealViewer
+    elif game_id == "splendor":
+        from gamenight.games.splendor.bracket_gui import BracketRevealViewer
+    else:
+        raise typer.BadParameter(f"replay-bracket-gui is not yet implemented for game '{game_id}'.")
+
+    return BracketRevealViewer(
+        summary, bracket_dir, first_game_delay=first_game_delay, rest_delay=rest_delay, show_final=show_final
+    )
 
 
 def _run_gui_game(
@@ -551,12 +742,10 @@ def _run_gui_game(
     )
 
 
-def _single_game_records(result: MatchResult, first_id: str, second_id: str) -> dict[str, tuple[int, int]]:
-    if result.winner == first_id:
-        return {first_id: (1, 0), second_id: (0, 1)}
-    if result.winner == second_id:
-        return {first_id: (0, 1), second_id: (1, 0)}
-    return {first_id: (0, 0), second_id: (0, 0)}
+def _single_game_records(result: MatchResult, player_ids: list[str]) -> dict[str, tuple[int, int]]:
+    if result.winner is None:
+        return {pid: (0, 0) for pid in player_ids}
+    return {pid: ((1, 0) if pid == result.winner else (0, 1)) for pid in player_ids}
 
 
 if __name__ == "__main__":

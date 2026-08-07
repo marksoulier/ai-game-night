@@ -188,6 +188,115 @@ is exposed in `observe()`'s `public_state.points` and shown in `render_text` /
 `bracket_summary.json`, and is used by `run-bracket` as a tiebreaker when a series ends
 with equal wins — the bot that took less damage overall wins the tiebreak.
 
+### Tournament Mode (Round Robin + Seeded Bracket)
+
+`run-tournament` runs a full event in one command: shuffle the entrants, play a round
+robin (every entrant plays every other entrant once), seed a single-elimination bracket
+from the round-robin standings (best vs. worst, cross-paired so 1v4/2v3 rather than
+1v2/3v4), then run that bracket. It writes `tournament_summary.json` (round-robin
+standings + results, bracket rounds, overall standings, champion) plus every game's
+replay file.
+
+```bash
+uv run gamenight run-tournament --game splendor \
+  --bots greedy,random,player:mark,player:alice \
+  --round-robin-games 1 --bracket-games 3 \
+  --output-dir artifacts/tournament
+```
+
+Entrant count is unconstrained — 2 is a valid (if short) tournament, and there's no
+upper bound; the bracket phase byes an odd one out per round exactly like `run-bracket`
+does on its own. This works for any game with a `GameProtocol` implementation, not just
+Splendor.
+
+### Bracket Reveal GUI
+
+`replay-bracket-gui` turns a saved `bracket_summary.json` or `tournament_summary.json`
+(from `run-bracket` or `run-tournament`) into a live "reveal" window: the full bracket
+tree with later rounds blank, a "Play Next Match" button that replays each match's saved
+games on an embedded board (first game slow, the rest fast), and the winner propagating
+into the next round until a champion is crowned. If a `tournament_summary.json` is
+present, round-robin standings and a live-updating overall-standings table are shown
+alongside the tree.
+
+```bash
+uv run gamenight replay-bracket-gui --game splendor --bracket-dir artifacts/tournament
+```
+
+- `--final` skips the reveal animation and shows the completed bracket immediately
+  (useful for re-opening a bracket you've already revealed once).
+- `--first-game-delay` / `--rest-delay` control playback speed (a match's first game
+  plays slow enough to follow, the rest play fast).
+
+This is currently implemented per-game (`games/<game>/bracket_gui.py`) rather than
+generically, the same way each game gets its own `gui.py` — Battleship and Splendor both
+have one; a new game needs its own before `replay-bracket-gui --game <new_game>` works
+(it errors clearly, naming the game, if one isn't registered yet).
+
+### Checking Bot Speed (Admin)
+
+`check-bot-speed` times every submitted player bot's `choose_action` calls, one bot at a
+time (playing headless games against fast `--opponent` baselines filling every other
+seat), and warns about anyone slower than a threshold — run this before a live
+tournament, where one slow bot stalls the whole room waiting on it every time it's up.
+
+```bash
+uv run gamenight check-bot-speed --game splendor --games 3 --threshold 0.5
+```
+
+```
+Checking 7 bot(s) for 'battleship': example_player, goob, jayse, josh, mark, phil, tanner
+(2 game(s) each, vs 'random' filling other seats, threshold 0.5s/action)
+
+  player:example_player       actions=176  mean=    0.0ms  max=    0.0ms  [ok]
+  player:phil                 actions=116  mean=  822.5ms  max=  900.1ms  [SLOW]
+    WARNING: player:phil took 0.90s on its slowest action (> 0.50s threshold) -- too slow for a live tournament.
+  ...
+
+Result: one or more bots need attention before the tournament (see WARNINGs above).
+```
+
+- `--games`: more games means more sampled actions (and more confidence an occasional
+  slow call — e.g. first-call import overhead — isn't a fluke either way).
+- `--opponent`: kept to a fast baseline (`random` by default) on purpose — a `greedy` or
+  `human` opponent would add its own thinking time to the loop and make it unclear whose
+  slowness you're looking at. Only the bot-under-test's `choose_action` calls are timed.
+- `--only name1,name2`: check specific bots instead of everyone under `bots/players/`.
+- Also flags any bot that raises an exception mid-action (the match engine's normal
+  fallback-to-`legal_actions[0]` behavior masks this in a real match — this surfaces it
+  explicitly instead of letting a broken bot look merely "fine" all game).
+- Exits with status `1` if anything was flagged, `0` if every bot is clean — usable in a
+  pre-tournament checklist/script, not just read by eye.
+- Works for any game with player bots, not just Splendor: `--game battleship`,
+  `--game connect_four`, etc.
+- A thin `scripts/check_bot_speed.py` wrapper exists too, matching `scripts/run_game.py`'s
+  pattern, for running it directly with `uv run python scripts/check_bot_speed.py ...`.
+
+## Splendor
+
+Splendor is a shared-market engine-builder: no hidden fleets, almost no hidden
+information at all (see `games/splendor/README.md`'s Information Policy) — the only
+thing redacted (from bots -- the GUI shows it openly) is which cards a player has
+reserved. Its GUI seats players around the table (you at the bottom, opponents fanned
+around the rest, 2-4 of them) with the market/bank/nobles shared in the center, each
+mat showing points, owned cards as color-coded stacks, tokens, and reserved cards in
+full — and scrolls/pans rather than clipping once that's a lot of board to show.
+
+```bash
+uv run gamenight run-game --game splendor --mode gui --bots greedy,random,player:mark --gui-delay 0.4 --replay-file artifacts/splendor_gui.json
+```
+
+Splendor tracks **points** (prestige points, same field name real Splendor uses) the
+same way Battleship tracks remaining ship cells — exposed via `remaining_points()`, used
+by `run-bracket`/`run-series` as a tiebreaker when a series ends with equal wins.
+
+This repo's `SplendorGame` supports 2-4 players (`SplendorGame(num_players=N)`,
+`player_ids = ["player_1", ..., "player_N"]`) — use `--bots name1,name2,name3` on
+`run-game` for 3-4 players instead of `--bot-1`/`--bot-2`. See
+`games/splendor/README.md`'s Player Count section for the infrastructure behind this
+(a factory-based `GameRegistry`) and what's still 2-competitor-only (`run-series`,
+`run-bracket`, `run-tournament`).
+
 ## Replaying Matches
 
 Every `run-game`, `run-bracket`, etc. writes a JSON replay file (a list of per-turn
