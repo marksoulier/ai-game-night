@@ -1,0 +1,4 @@
+# Training-only dependency -- bot.py itself (what actually plays in a real match)
+# is pure stdlib (json/math/random/pathlib) on purpose, see bot.py's module
+# docstring. numpy is only needed to run train.py.
+numpy>=1.26
