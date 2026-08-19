@@ -691,6 +691,10 @@ def _build_viewer(
         from gamenight.games.splendor.gui import SplendorViewer
 
         return SplendorViewer(player_ids=player_ids or ["player_1", "player_2"], matchup_label=matchup_label)
+    if game_id == "mine_duel":
+        from gamenight.games.mine_duel.gui import MineDuelViewer
+
+        return MineDuelViewer(matchup_label=matchup_label)
     raise typer.BadParameter(f"GUI mode is not yet implemented for game '{game_id}'.")
 
 

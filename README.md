@@ -333,6 +333,7 @@ uv run gamenight run-game --game battleship --mode gui --bot-1 greedy --bot-2 ra
 Game spotlight page:
 
 - `src/gamenight/games/tictactoe/README.md`
+- `src/gamenight/games/mine_duel/README.md`
 
 ## Player Workflow
 
