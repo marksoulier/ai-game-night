@@ -17,17 +17,35 @@ class MatchResult:
     replay: list[dict[str, Any]]
 
 
+DEFAULT_MAX_TURNS = 200
+
+
+def _resolve_max_turns(game: GameProtocol, max_turns: int | None) -> int:
+    """`max_turns` counts `step()` calls, not logical player turns -- games whose
+    turns span multiple steps (e.g. Ticket to Ride's draw-two-cards, choose-tickets
+    sub-phases) need a much bigger budget than a simple one-action-per-turn game to
+    reliably reach a real conclusion instead of getting cut off mid-game. Rather than
+    make every caller (CLI commands, bracket/tournament runners) know and pass the
+    right number per game, a game can declare its own `RECOMMENDED_MAX_TURNS` class
+    attribute; callers that don't explicitly override `max_turns` pick it up
+    automatically. See `games/ticket_to_ride/EDGE_CASES.md` for the measurement that
+    prompted this."""
+    if max_turns is not None:
+        return max_turns
+    return getattr(game, "RECOMMENDED_MAX_TURNS", DEFAULT_MAX_TURNS)
+
+
 def run_match(
     game: GameProtocol,
     bots: dict[str, BotProtocol],
     seed: int | None = None,
-    max_turns: int = 200,
+    max_turns: int | None = None,
 ) -> MatchResult:
     return _run_match_impl(
         game=game,
         bots=bots,
         seed=seed,
-        max_turns=max_turns,
+        max_turns=_resolve_max_turns(game, max_turns),
         step_observer=None,
         turn_delay_s=0.0,
     )
@@ -37,7 +55,7 @@ def run_match_with_observer(
     game: GameProtocol,
     bots: dict[str, BotProtocol],
     seed: int | None = None,
-    max_turns: int = 200,
+    max_turns: int | None = None,
     step_observer: Callable[[dict[str, Any]], None] | None = None,
     turn_delay_s: float = 0.0,
 ) -> MatchResult:
@@ -45,7 +63,7 @@ def run_match_with_observer(
         game=game,
         bots=bots,
         seed=seed,
-        max_turns=max_turns,
+        max_turns=_resolve_max_turns(game, max_turns),
         step_observer=step_observer,
         turn_delay_s=turn_delay_s,
     )

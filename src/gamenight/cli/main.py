@@ -517,7 +517,11 @@ def check_bot_speed(
     """
     registry = build_registry()
     game_impl = registry.get(game)
-    max_turns = 200
+    # See core/match.py's `_resolve_max_turns` -- a game whose turns span multiple
+    # step() calls (e.g. Ticket to Ride) declares its own budget via
+    # RECOMMENDED_MAX_TURNS; this loop doesn't go through run_match so it has to
+    # apply that itself rather than picking it up automatically.
+    max_turns = getattr(game_impl, "RECOMMENDED_MAX_TURNS", 200)
 
     players_dir = GAMES_ROOT / game / "bots" / "players"
     if not players_dir.exists():
@@ -695,6 +699,10 @@ def _build_viewer(
         from gamenight.games.mine_duel.gui import MineDuelViewer
 
         return MineDuelViewer(matchup_label=matchup_label)
+    if game_id == "ticket_to_ride":
+        from gamenight.games.ticket_to_ride.gui import TicketToRideViewer
+
+        return TicketToRideViewer(player_ids=player_ids or ["player_1", "player_2"], matchup_label=matchup_label)
     raise typer.BadParameter(f"GUI mode is not yet implemented for game '{game_id}'.")
 
 

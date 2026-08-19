@@ -334,6 +334,7 @@ Game spotlight page:
 
 - `src/gamenight/games/tictactoe/README.md`
 - `src/gamenight/games/mine_duel/README.md`
+- `src/gamenight/games/ticket_to_ride/README.md`
 
 ## Player Workflow
 
