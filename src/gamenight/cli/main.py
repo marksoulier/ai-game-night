@@ -5,6 +5,7 @@ import hashlib
 import py_compile
 import re
 import secrets
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -624,6 +625,156 @@ def check_bot_speed(
         typer.echo("Result: one or more bots need attention before the tournament (see WARNINGs above).")
         raise typer.Exit(code=1)
     typer.echo(f"Result: all {len(candidates)} bot(s) stayed under {threshold:.2f}s/action with no errors.")
+
+
+@app.command("sync-players")
+def sync_players(
+    game: str = typer.Option(..., help="Game id whose player bots to pull in."),
+    label: str | None = typer.Option(
+        None,
+        help="Short label recorded in each commit message, e.g. 'halfway' or 'final'. "
+        "Defaults to the current timestamp if omitted.",
+    ),
+    remote: str = typer.Option("origin", help="Git remote to fetch player branches from."),
+    only: str | None = typer.Option(
+        None,
+        help="Comma-separated player/<X> branch suffixes to sync from, e.g. 'mark,hunter' -- "
+        "restricts to exactly these branches instead of every 'player/*' branch found. "
+        "Use this to exclude old/superseded branches (see the warning below) once you know "
+        "which branch is each player's current one.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would be synced without creating any commits."
+    ),
+) -> None:
+    """Pull every player's CURRENT bot for `--game` onto the branch you have checked out
+    right now (run this from `main`) -- one commit per player -- so an admin can snapshot
+    "everyone's current solution" mid-event (and again near the end) without waiting for
+    every player to open and merge a PR first.
+
+    For each `{remote}/player/<name>` branch (or just the ones named in `--only`), this
+    reads whatever bot folders currently exist under that branch's
+    `games/{game}/bots/players/` (usually just `<name>`, but picks up extras too, e.g.
+    `mark_v2`) and checks out *only* that path onto your current branch -- nothing else
+    on a player's branch (in-progress edits elsewhere, a different game's bot,
+    uncommitted experiments) is touched. A player who hasn't touched this game yet is
+    silently skipped; a player with no changes since the last sync produces no commit
+    at all. Safe to run repeatedly for exactly that reason.
+
+    **This trusts branch content as-is -- it has no way to know a branch is stale.** If
+    someone has multiple old `player/*` branches (an abandoned early draft, a later
+    "real" one), every branch that still differs from `main` looks like "new work" to
+    this command, even if it's actually *older* than what's already on `main`. Always
+    `--dry-run` first and read the branch names in the output -- if anything looks like
+    an old/duplicate branch rather than that player's live one, re-run with `--only` to
+    exclude it.
+
+    Doesn't push anything -- review with `git log`, then `git push` yourself when ready.
+    """
+    registry = build_registry()
+    if game not in registry.list_game_ids():
+        raise typer.BadParameter(f"Unknown game '{game}'. Known games: {', '.join(registry.list_game_ids())}")
+
+    repo_root = Path.cwd()
+
+    def run_git(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
+        result = subprocess.run(["git", *args], cwd=repo_root, capture_output=True, text=True)
+        if check and result.returncode != 0:
+            raise typer.BadParameter(f"git {' '.join(args)} failed:\n{result.stderr.strip()}")
+        return result
+
+    def revert_path(path: str) -> None:
+        """Undo a preview `checkout <branch> -- <path>`, restoring index+worktree to
+        HEAD's state at `path` -- including when HEAD has no such path at all (a
+        brand-new player folder), where `git checkout HEAD -- <path>` alone would fail
+        with "pathspec did not match any files" since there's nothing there to check
+        out. `reset` un-stages (index -> HEAD, dropping the entry entirely if HEAD
+        lacks it), `checkout` restores the worktree from that index for whatever HEAD
+        *does* have, and `clean` removes any now-untracked leftover files a brand-new
+        path would otherwise leave behind on disk."""
+        run_git(["reset", "--quiet", "--", path], check=False)
+        run_git(["checkout", "--quiet", "--", path], check=False)
+        run_git(["clean", "-fd", "--quiet", "--", path], check=False)
+
+    # Untracked files (`??`) don't interfere with a scoped `checkout <path>` + `commit`
+    # (they're not touched by either), so only tracked-file dirtiness blocks this --
+    # an untracked work-in-progress file elsewhere in the repo shouldn't stop a sync.
+    dirty = [line for line in run_git(["status", "--porcelain"]).stdout.splitlines() if not line.startswith("??")]
+    if dirty:
+        raise typer.BadParameter(
+            "Working tree has uncommitted changes to tracked files -- commit, stash, or discard "
+            "them first (sync-players creates commits on your current branch as it goes):\n"
+            + "\n".join(dirty)
+        )
+
+    current_branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    typer.echo(f"Syncing '{game}' player bots onto branch '{current_branch}' (fetching '{remote}')...")
+    run_git(["fetch", remote])
+
+    branches = [
+        line.strip()
+        for line in run_git(["branch", "-r", "--list", f"{remote}/player/*"]).stdout.splitlines()
+        if line.strip()
+    ]
+    if only:
+        wanted_suffixes = {name.strip() for name in only.split(",") if name.strip()}
+        wanted_branches = {f"{remote}/player/{suffix}" for suffix in wanted_suffixes}
+        missing = wanted_branches - set(branches)
+        if missing:
+            raise typer.BadParameter(f"No such branch(es): {', '.join(sorted(missing))}")
+        branches = [b for b in branches if b in wanted_branches]
+    if not branches:
+        typer.echo(f"No '{remote}/player/*' branches found.")
+        raise typer.Exit()
+
+    sync_label = label or time.strftime("%Y-%m-%d %H:%M")
+    game_path = f"src/gamenight/games/{game}/bots/players"
+
+    synced: list[str] = []
+    unchanged: list[str] = []
+    skipped: list[str] = []
+
+    for branch in branches:
+        listing = run_git(["ls-tree", "-d", "--name-only", f"{branch}:{game_path}"], check=False)
+        if listing.returncode != 0 or not listing.stdout.strip():
+            skipped.append(branch)
+            continue
+
+        short_sha = run_git(["rev-parse", "--short", branch]).stdout.strip()
+        for player_name in listing.stdout.splitlines():
+            player_name = player_name.strip()
+            if not player_name:
+                continue
+            player_path = f"{game_path}/{player_name}"
+
+            run_git(["checkout", branch, "--", player_path])
+            diff = run_git(["diff", "--cached", "--stat", "--", player_path]).stdout
+
+            if not diff.strip():
+                revert_path(player_path)  # nothing changed, don't leave it staged
+                unchanged.append(f"{player_name} ({branch})")
+                continue
+
+            if dry_run:
+                revert_path(player_path)  # undo the preview checkout
+                synced.append(f"{player_name} ({branch} @ {short_sha}) -- WOULD sync")
+                continue
+
+            run_git(["commit", "-m", f"sync-players ({sync_label}): {player_name}'s {game} bot from {branch} @ {short_sha}"])
+            synced.append(f"{player_name} ({branch} @ {short_sha})")
+
+    typer.echo("")
+    if synced:
+        verb = "Would sync" if dry_run else "Synced"
+        typer.echo(f"{verb} {len(synced)} player bot(s):")
+        for entry in synced:
+            typer.echo(f"  {entry}")
+    if unchanged:
+        typer.echo(f"Unchanged (already up to date): {', '.join(unchanged)}")
+    if skipped:
+        typer.echo(f"Skipped (no '{game}' bot on branch): {', '.join(skipped)}")
+    if not dry_run and synced:
+        typer.echo(f"\n{len(synced)} commit(s) created on '{current_branch}'. Review with `git log`, then `git push` when ready.")
 
 
 def _series_first_player(
